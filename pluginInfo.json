@@ -1,0 +1,48 @@
+{
+	"$schema": "https://raw.githubusercontent.com/FalconChristmas/fpp-plugin-Template/master/pluginInfo.schema.json",
+	"repoName": "fpp-plugin-FalconBeat",
+	"name": "FalconBeat — synced show audio for phones",
+	"author": "Garrett",
+	"description": "Plays your show's audio on visitors' phones in sync with the sequence: pushes playlist audio to a self-hosted BeatSync server and issues scheduled PLAY/PAUSE over its admin socket.",
+	"homeURL": "https://github.com/YOUR-USERNAME/fpp-plugin-FalconBeat",
+	"srcURL": "https://github.com/YOUR-USERNAME/fpp-plugin-FalconBeat.git",
+	"bugURL": "https://github.com/YOUR-USERNAME/fpp-plugin-FalconBeat/issues",
+	"allowUpdates": 1,
+	"releaseNotesStyle": "gitHistory",
+	"privacy": {
+		"summary": "Sends your show audio files and play/pause commands to the BeatSync server address you configure, so visitors' phones can play the show audio in sync.",
+		"sends": [
+			{
+				"to": "the BeatSync/ingest server you configure",
+				"what": "show audio files, playback commands, room admin secret",
+				"why": "lets visitors' phones stream the show audio in sync with the lights",
+				"alwaysOn": false
+			}
+		],
+		"collects": [],
+		"sensors": [],
+		"remoteAccess": "none",
+		"systemChanges": [
+			{
+				"kind": "service",
+				"what": "runs a background Python daemon (falconbeatd) while fppd is running; listens only on a local unix socket"
+			}
+		],
+		"closedCode": false,
+		"other": "none"
+	},
+	"versions": [
+		{
+			"minFPPVersion": "9.0",
+			"maxFPPVersion": "9.99",
+			"branch": "master",
+			"sha": ""
+		},
+		{
+			"minFPPVersion": "10.0",
+			"maxFPPVersion": "0",
+			"branch": "master",
+			"sha": ""
+		}
+	]
+}
