@@ -16,6 +16,12 @@ mkdir -p "${MEDIADIR}/plugindata/fpp-plugin-FalconBeat"
 
 # Require an fppd restart: callbacks.py registers media/playlist hooks only at
 # fppd start, and on upgrade a running falconbeatd keeps the OLD code until
-# respawned. Set the flag through FPP's helper — never edit the settings
-# file or restart fppd directly (PLUGIN_GUIDELINES §3.4/§3.6).
-setSetting restartFlag 1
+# respawned. Set the flag through FPP's helper; fall back to the settings
+# API on images whose common lacks it — never edit the settings file or
+# restart fppd directly (PLUGIN_GUIDELINES §3.4/§3.6).
+if command -v setSetting >/dev/null 2>&1; then
+    setSetting restartFlag 1
+else
+    curl -s --max-time 5 -X PUT -d '1' \
+        "http://localhost/api/settings/restartFlag" >/dev/null 2>&1 || true
+fi
