@@ -21,9 +21,15 @@ pip installs are system-wide across plugins).
 - `callbacks.py --list` → `media,playlist,lifecycle` (10s answer timeout).
 - `callbacks.py --type media --data '<json>'` — media JSON: `{type: both|media|
   sequence|pause|video|event, Sequence, Media, <id3 tags>}`. Blocking.
-- `--type playlist --data '<json>'` — full playlist object + `{Action:
-  start|stop, Section, Item}`. Blocking. Playlist media lives under
-  `leadIn|mainPlaylist|leadOut[].media.mediaFilename` (or `.mediaFilename`).
+- `--type playlist --data '<json>'` — `Playlist::GetInfo()` + `{Action:
+  start|playing|query_next|stop, Section: LeadIn|MainPlaylist|LeadOut,
+  Item: int index within that section}` (PlaylistCallback::run @
+  Plugins.cpp:1482). GetInfo() carries `name`, `currentState`,
+  `currentEntry`, `size`, repeat/loop flags — **never the entry list**.
+  The queue must come from `GET /api/playlist/<name>?mergeSubs=1`,
+  which returns `leadIn|mainPlaylist|leadOut[]` with media under
+  `.mediaName` (or `media.mediaFilename` / `.mediaFilename` on other
+  entry shapes; `type:"playlist"` entries only expand via mergeSubs).
 - `--type lifecycle startup|shutdown` — no --data. Waited max 5s.
 
 ## BeatSync protocol (beatsync @ 94c38ab)
@@ -52,16 +58,16 @@ pip installs are system-wide across plugins).
   upload/complete is unauthenticated → stays LAN-only, never proxied.
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
-  payload top-level, then nested `playlist`/`Playlist`/`playlistData`
-  objects, then `GET /api/playlist/<name>` by name — callback name keys
-  first, then `current_playlist` in `/api/fppd/status`) and pushes
-  entries 0+1 at start; each PLAY then
+  payload sections if present, else `GET /api/playlist/<name>` using the
+  callback's `name`, then `current_playlist` in `/api/fppd/status`) and
+  pushes entries 0+1 at start; each PLAY then
   advances the cursor and pushes `queue[idx+1]` in the background so
   phones download during the current track. Every PLAY also evicts registered sources outside
   {current, next} — played tracks, parked (paused) sources, AND tracks
   skipped mid-list all leave the room + get DELETE'd from ingest.
-  `query_next` also fires an opportunistic ensure_source for its Item's
-  mediaFilename (belt-and-suspenders even without a queue).
+  `query_next` fires when the current entry finishes (its `Item` is the
+  finished index): it lazy-fetches the queue if start missed us, then
+  pushes `queue[cursor+1]` — the true next entry.
   ensure_source stays the on-demand fallback for manual plays.
 - Now-playing metadata (server commit e0a318b): plugin PUTs
   `{ingest}/config/nowplaying` (Bearer) per media event —

@@ -660,36 +660,40 @@ def playlist_media_files(playlist):
     names = []
     for section in ("leadIn", "mainPlaylist", "leadOut"):
         for entry in playlist.get(section) or []:
-            if not isinstance(entry, dict):
-                continue
-            name = None
-            media = entry.get("media")
-            if isinstance(media, dict):
-                name = media.get("mediaFilename")
-            if not name:
-                name = entry.get("mediaFilename")
+            name = entry_media_name(entry)
             if name:
                 names.append(name)
     return names
 
 
 def entry_media_name(entry):
-    """mediaFilename from a single playlist entry dict (schema varies)."""
+    """Media filename from a single playlist entry dict (schema varies).
+
+    FPP playlist files use "mediaName" (extraMediaName/extraMedia hold
+    alternates we don't push). The runtime currentEntry the callback
+    carries may instead nest {"media": {"mediaFilename": ...}}."""
     if not isinstance(entry, dict):
         return None
     media = entry.get("media")
     if isinstance(media, dict) and media.get("mediaFilename"):
         return media.get("mediaFilename")
-    return entry.get("mediaFilename") or entry.get("Media")
+    return (entry.get("mediaFilename") or entry.get("mediaName")
+            or entry.get("Media"))
 
 
 def fpp_playlist_files(name):
-    """Ordered media filenames for a named playlist via the FPP API —
-    fallback when the playlist callback didn't carry the entry list."""
+    """Ordered media filenames for a named playlist via the FPP API.
+
+    The playlist callback only carries Playlist::GetInfo() — name, size,
+    currentEntry, Action/Section/Item — never the entry list itself, so
+    the queue always comes from this fetch. mergeSubs expands sub-playlist
+    entries (type "playlist" carries no media of its own)."""
     if not name:
         return []
     try:
-        url = "http://127.0.0.1/api/playlist/%s" % urllib.parse.quote(str(name))
+        base = FPP_STATUS_URL.rsplit("/api/", 1)[0]
+        url = ("%s/api/playlist/%s?mergeSubs=1"
+               % (base, urllib.parse.quote(str(name))))
         with urllib.request.urlopen(url, timeout=3) as r:
             return playlist_media_files(json.loads(r.read()))
     except Exception as e:
@@ -1179,18 +1183,14 @@ class FalconBeatDaemon:
                 self._disconnect_timer.cancel()
                 self._disconnect_timer = None
             self._connect()
+            # The callback data is Playlist::GetInfo() — it carries the
+            # playlist "name" but never the entry list, so the queue comes
+            # from the playlist API (sections in data are kept as a
+            # best-effort first try for other FPP variants).
             names = playlist_media_files(data)
             if not names:
-                # Maybe the playlist object is nested under a key.
-                for key in ("playlist", "Playlist", "playlistData"):
-                    if isinstance(data.get(key), dict):
-                        names = playlist_media_files(data[key])
-                        if names:
-                            break
-            if not names:
-                # No entry list at all — fetch the playlist by name.
-                pl = (data.get("Playlist") or data.get("playlistName")
-                      or data.get("name"))
+                pl = (data.get("name") or data.get("Playlist")
+                      or data.get("playlistName"))
                 if not pl:
                     st = fpp_status() or {}
                     pl = st.get("current_playlist") or ""
@@ -1211,14 +1211,21 @@ class FalconBeatDaemon:
             LOG.info("playlist %s", action)
             self._playlist_active = True
             if action == "query_next":
-                # FPP is preparing the next entry — if its Item carries the
-                # media name, start that upload now (belt & suspenders for
-                # the queue lookahead, and a fallback when the queue failed).
-                name = entry_media_name(data.get("Item")) or \
-                    entry_media_name(data)
-                if name:
+                # Fired when the current entry finishes, Item = its index
+                # within Section (an int, not the entry dict). The queue is
+                # the source of truth for "next" — fetch it lazily if the
+                # start event missed us, then push queue[cursor+1] now
+                # rather than waiting for the next media event.
+                if not self._queue and data.get("name"):
+                    names = fpp_playlist_files(data["name"])
+                    if names:
+                        self._queue = names
+                        LOG.info("playlist queue (query_next): %d entries",
+                                 len(names))
+                if self._queue:
                     threading.Thread(
-                        target=self._ensure_quiet, args=(name,), daemon=True
+                        target=self._push_ahead, args=(self._queue_idx,),
+                        daemon=True
                     ).start()
         elif action in ("pause", "paused"):
             LOG.info("playlist paused")
@@ -1311,12 +1318,6 @@ class FalconBeatDaemon:
                 self.ensure_source(self._queue[i])
             except Exception as e:
                 LOG.warning("start push %s failed: %s", self._queue[i], e)
-
-    def _ensure_quiet(self, media_name):
-        try:
-            self.ensure_source(media_name)
-        except Exception as e:
-            LOG.warning("early push %s failed: %s", media_name, e)
 
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
