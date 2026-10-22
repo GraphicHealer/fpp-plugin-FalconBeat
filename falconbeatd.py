@@ -412,6 +412,15 @@ class BeatSyncSession:
                     self.registered_urls = {
                         s.get("url") for s in ev.get("sources", [])
                     }
+            elif ev.get("type") == "LOAD_AUDIO_SOURCE":
+                # We have nothing to load — we're the source — but the
+                # coordination counts every room client; ACK immediately so
+                # the scheduled play isn't held up on our account.
+                url = (ev.get("audioSourceToPlay") or {}).get("url")
+                if url:
+                    self._send(
+                        {"type": "AUDIO_SOURCE_LOADED", "source": {"url": url}}
+                    )
             self.on_event(msg)
             return
         self.on_event(msg)
