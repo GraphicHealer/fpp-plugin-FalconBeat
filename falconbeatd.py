@@ -82,6 +82,13 @@ DEFAULTS = {
     # Milliseconds between the gate releasing and FPP's media output actually
     # starting — subtracted from the phone track offset on gated starts.
     "startLagMs": "250",
+    # Phones fetch audio over the public internet; when a track was just
+    # registered, the server only holds its 3s load-coordination window once
+    # PLAY is sent — a multi-MB download may not fit. On gated starts where
+    # this URL was registered during this call, wait this long before sending
+    # PLAY so the download gets a head start (FPP stays gated the whole time;
+    # the wait counts against gateMaxSec). 0 disables.
+    "preloadSettleMs": "2500",
 }
 
 
@@ -936,7 +943,12 @@ class FalconBeatDaemon:
         self._set_nowplaying(doc)
 
         session = self._connect()
+        # Room membership check BEFORE ensure_source registers — phones start
+        # downloading on SET_AUDIO_SOURCES, so a URL registered during this
+        # call means the download only just began.
+        known_urls = set(self._registered)
         url = self.ensure_source(media_name)
+        just_registered = url not in known_urls
         delay = session.expected_delay_s()
         if gated:
             # fppd is blocked in the media callback. We release it just before
@@ -967,6 +979,17 @@ class FalconBeatDaemon:
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
         _t = time.monotonic()
+        # Freshly registered file + gated start: phones only just learned the
+        # URL and download it over WAN. The server's 3s load-coordination
+        # clock doesn't start until PLAY arrives — give the download a head
+        # start first so phones fit inside that window instead of missing
+        # the intro. FPP stays gated the whole time either way.
+        if gated and just_registered:
+            settle = float(self.cfg.get("preloadSettleMs") or 0) / 1000.0
+            if settle > 0:
+                LOG.info("new source %s — settling %.2fs for phone download",
+                         media_name, settle)
+                time.sleep(settle)
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
         )
