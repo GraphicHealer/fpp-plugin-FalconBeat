@@ -23,7 +23,16 @@ $fields = array(
     array('mediaPublicUrl', 'Public Media URL',   'text',     'e.g. https://falconbeat.example.com/media — where phones fetch audio. Must end with /media.'),
     array('listenerUrl',    'Listener Page URL',  'text',     'Optional: public URL of the listener web app, shown on the status page.'),
     array('nudgeMs',        'Extra Delay (ms)',   'text',     'Added to the computed schedule delay for the phone track offset. 0 = auto.'),
+    array('gateMaxSec',     'Sync Gate (sec)',    'text',     'Hold each track\'s start until phones confirm loaded (max seconds). 0 = off.'),
+    array('startLagMs',     'FPP Start Lag (ms)', 'text',     'How long FPP takes to actually start media after the gate releases — subtracted from the phone offset. Tune by ear.'),
     array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
+);
+
+$defaults = array(
+    'enabled' => '1',
+    'roomId' => '000000',
+    'gateMaxSec' => '10',
+    'startLagMs' => '250',
 );
 
 function fb_get($key, $default = '') {
@@ -231,7 +240,7 @@ entries run.
 <table class="table table-striped" style="max-width: 720px;">
 <?php foreach ($fields as $f):
     $key = $f[0]; $label = $f[1]; $type = $f[2]; $help = $f[3];
-    $val = fb_get($key, $key === 'enabled' ? '1' : ($key === 'roomId' ? '000000' : ''));
+    $val = fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
 ?>
 <tr>
     <td style="width: 200px;"><b><?php echo htmlspecialchars($label); ?></b></td>

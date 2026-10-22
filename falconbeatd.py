@@ -74,6 +74,14 @@ DEFAULTS = {
     # Seconds after a playlist stop before the admin WS drops (room GC'd ~60s
     # later regardless). Small grace lets listeners see the PAUSE land.
     "disconnectGraceSec": "5",
+    # fppd blocks in the media callback inside PreparePlay — before the media
+    # output exists. The callback waits on the daemon up to this many seconds
+    # for push + register + PLAY echo, so tracks can't start before phones
+    # are ready. 0 disables gating.
+    "gateMaxSec": "10",
+    # Milliseconds between the gate releasing and FPP's media output actually
+    # starting — subtracted from the phone track offset on gated starts.
+    "startLagMs": "250",
 }
 
 
@@ -894,11 +902,13 @@ class FalconBeatDaemon:
             self._registered.add(url)
         return url
 
-    def play(self, media_name, data=None):
+    def play(self, media_name, data=None, gated=False):
         with self._pb_lock:
-            self._play(media_name, data)
+            self._play(media_name, data, gated)
 
-    def _play(self, media_name, data=None):
+    def _play(self, media_name, data=None, gated=False):
+        if media_name == self._current_media:
+            return
         self._playlist_active = True
         # Push now-playing first — the page can show the track even while
         # phones are still loading the audio.
@@ -915,11 +925,34 @@ class FalconBeatDaemon:
 
         session = self._connect()
         url = self.ensure_source(media_name)
-        pos, _playing = fpp_position_seconds()
         delay = session.expected_delay_s()
-        target = pos + delay
-        LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f)",
-                 media_name, target, pos, delay)
+        if gated:
+            # fppd is blocked in the media callback; the media output starts
+            # a short time (startLagMs) after we release it. Phones begin at
+            # serverTimeToExecute (~delay from now) at offset `target`, so
+            # target should equal the position FPP will reach by then:
+            # delay minus the media-startup lag.
+            lag = float(self.cfg.get("startLagMs") or 0) / 1000.0
+            target = max(0.0, delay - lag)
+            LOG.info("PLAY %s @ %.2fs (gated: delay %.2f - lag %.2f)",
+                     media_name, target, delay, lag)
+        else:
+            pos, _playing = fpp_position_seconds()
+            target = pos + delay
+            LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f)",
+                     media_name, target, pos, delay)
+        # Silence the previous track's tail while phones load the new one.
+        if self._current_source and self._current_source != url:
+            try:
+                session.send_command(
+                    {
+                        "type": "PAUSE",
+                        "audioSource": self._current_source,
+                        "trackTimeSeconds": 0.0,
+                    }
+                )
+            except Exception as e:
+                LOG.warning("pre-play PAUSE of old source failed: %s", e)
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
         )
@@ -962,15 +995,17 @@ class FalconBeatDaemon:
 
         self.cfg = load_settings()
         if not cfg_bool(self.cfg.get("enabled", "1")):
-            return
+            return True  # nothing to do — release the gate immediately
 
         try:
             if cb_type == "playlist":
-                self._on_playlist(data)
+                return self._on_playlist(data)
             elif cb_type == "media":
-                self._on_media(data)
+                return self._on_media(data)
+            return True
         except Exception as e:
             LOG.exception("event %s failed: %s", cb_type, e)
+            return False
 
     def _on_playlist(self, data):
         action = str(data.get("Action", "")).lower()
@@ -986,11 +1021,16 @@ class FalconBeatDaemon:
                 threading.Thread(
                     target=self._push_all, args=(names,), daemon=True
                 ).start()
+        elif action in ("playing", "query_next"):
+            # informational — playing confirms the playlist is live,
+            # query_next is FPP's next-item hook. Neither ends playback.
+            LOG.info("playlist %s", action)
+            self._playlist_active = True
         elif action in ("pause", "paused"):
             LOG.info("playlist paused")
             self.pause()
-        else:
-            LOG.info("playlist %s", action or "stop")
+        elif action in ("stop", "stopping", "stopped"):
+            LOG.info("playlist %s", action)
             self._playlist_active = False
             self.pause()
             if self._np_doc and self._np_doc.get("playing"):
@@ -998,6 +1038,9 @@ class FalconBeatDaemon:
                     {"playing": False, "updatedAtMs": epoch_ms()}
                 )
             self._disconnect_later()
+        else:
+            LOG.info("playlist %s (unhandled)", action or "unknown")
+        return True
 
     def _push_all(self, names):
         for name in names:
@@ -1014,13 +1057,18 @@ class FalconBeatDaemon:
         if entry_type in ("both", "media", "video") and media_name:
             # fresh media -> any pending disconnect is moot while a playlist runs
             try:
-                self.play(media_name, data)
+                # fppd is blocked in our callback inside PreparePlay — the
+                # media output doesn't exist yet, so this is a gated start.
+                self.play(media_name, data, gated=True)
+                return True
             except Exception as e:
                 LOG.exception("PLAY %s failed: %s", media_name, e)
+                return False
         elif entry_type in ("pause", "sequence", "event"):
             # non-audio playlist entry: park listeners
             if self._current_source:
                 self.pause()
+        return True
 
     # -- control socket ---------------------------------------------------
 
@@ -1064,7 +1112,17 @@ class FalconBeatDaemon:
             if ev.get("cb_type") == "ping":
                 conn.sendall(b'{"ok":true}')
                 return
-            self.handle_event(ev)
+            ok = self.handle_event(ev)
+            # A "wait" event comes from the media callback while fppd is
+            # blocked in waitpid() inside PreparePlay — replying releases the
+            # gate and lets the track start.
+            if ev.get("wait"):
+                try:
+                    conn.sendall(
+                        json.dumps({"ok": bool(ok)}).encode("utf-8") + b"\n"
+                    )
+                except OSError:
+                    pass
         finally:
             try:
                 conn.close()

@@ -31,8 +31,28 @@ SOCK_PATH = os.path.join(
     DATADIR, "falconbeatd.sock" if HAS_UNIX else "falconbeatd.port"
 )
 DAEMON = os.path.join(PLUGINDIR, "falconbeatd.py")
+SETTINGS_PATH = os.path.join(
+    MEDIADIR, "config", "plugin." + PLUGIN_NAME
+)
+DEFAULT_GATE_SEC = 10.0
 LOG_FILE = os.path.join(LOGDIR, "plugin-%s.log" % PLUGIN_NAME)
 PY = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+
+
+def gate_sec():
+    """How long a media callback may hold the track start waiting for the
+    daemon's ready reply (fppd blocks in waitpid inside PreparePlay, so
+    returning releases the gate and the track starts). 0 = don't gate."""
+    try:
+        with open(SETTINGS_PATH) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip() == "gateMaxSec":
+                    v = v.strip().strip('"')
+                    return float(v) if v else 0.0
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_GATE_SEC
 
 
 def control_connect(timeout=5):
@@ -55,8 +75,8 @@ def log(msg):
         pass
 
 
-def send_to_daemon(payload, want_reply=False):
-    s = control_connect()
+def send_to_daemon(payload, want_reply=False, timeout=5):
+    s = control_connect(timeout)
     s.sendall(json.dumps(payload).encode("utf-8"))
     s.shutdown(socket.SHUT_WR)
     reply = b""
@@ -138,11 +158,25 @@ def main(argv):
         if not ensure_daemon():
             log("daemon unavailable; dropped %s event" % cb_type)
             return 1
+        # Media callbacks are blocking inside fppd's PreparePlay — before the
+        # media output exists. Holding our reply until the daemon finishes
+        # push + PLAY means the track can't start before phones are ready.
+        gate = gate_sec() if cb_type == "media" else 0.0
+        payload = {"cb_type": cb_type, "data": data}
+        if gate > 0:
+            payload["wait"] = True
         try:
-            send_to_daemon({"cb_type": cb_type, "data": data})
+            reply = send_to_daemon(
+                payload, want_reply=(gate > 0), timeout=(gate if gate > 0 else 5)
+            )
         except OSError as e:
             log("failed to forward %s event: %s" % (cb_type, e))
             return 1
+        if gate > 0:
+            if not reply:
+                log("sync gate: no daemon reply within %.1fs — released" % gate)
+            elif b'"ok":false' in reply:
+                log("sync gate: daemon reported not-ready — released")
         return 0
 
     # Unknown invocation — answer --list-style so fppd just ignores us
