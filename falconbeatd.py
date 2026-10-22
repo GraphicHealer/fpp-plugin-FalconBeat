@@ -1072,21 +1072,56 @@ class FalconBeatDaemon:
     def _delete_room_sources(self, urls, reason=""):
         """DELETE_AUDIO_SOURCES — drops queue entries and broadcasts
         SET_AUDIO_SOURCES so phones unload them. Fire-and-forget (the reply
-        is a ROOM_EVENT, not a SCHEDULED_ACTION echo)."""
+        is a ROOM_EVENT, not a SCHEDULED_ACTION echo). Evicted files are
+        also removed from the ingest media dir so the volume doesn't fill
+        with played tracks."""
         urls = [u for u in urls if u]
         if not urls:
             return
         with self._session_lock:
             session = self.session
         self._registered.difference_update(urls)
-        if session is None or not session._connected.is_set():
+        sent = False
+        if session is not None and session._connected.is_set():
+            try:
+                session._send({"type": "DELETE_AUDIO_SOURCES", "urls": urls})
+                sent = True
+                LOG.info("deleted %d room source(s)%s", len(urls),
+                         " (%s)" % reason if reason else "")
+            except Exception as e:
+                LOG.warning("DELETE_AUDIO_SOURCES failed: %s", e)
+        # Only drop the files when the room eviction went out (or the room is
+        # dead anyway) — a failed send with a live session would leave the
+        # room pointing at deleted files.
+        if sent or session is None or not session._connected.is_set():
+            self._delete_media_files(urls)
+
+    def _delete_media_files(self, urls):
+        """DELETE evicted files via ingest and forget them in _pushed so a
+        later play re-uploads from scratch."""
+        names = {n for n, u in self._pushed.items() if u in urls}
+        if not names:
             return
-        try:
-            session._send({"type": "DELETE_AUDIO_SOURCES", "urls": urls})
-            LOG.info("deleted %d room source(s)%s", len(urls),
-                     " (%s)" % reason if reason else "")
-        except Exception as e:
-            LOG.warning("DELETE_AUDIO_SOURCES failed: %s", e)
+        ingest = self.cfg["ingestUrl"].rstrip("/")
+        for name in names:
+            try:
+                quoted = urllib.parse.quote(os.path.basename(name))
+                status, resp = http_request(
+                    "DELETE",
+                    "%s/media/%s" % (ingest, quoted),
+                    headers={
+                        "Authorization": "Bearer %s" % self.cfg["ingestToken"]
+                    },
+                    timeout=15,
+                )
+                if status < 300:
+                    LOG.info("deleted media file %s", name)
+                    self._pushed.pop(name, None)
+                else:
+                    LOG.warning("ingest DELETE %s -> HTTP %d: %s",
+                                name, status, resp[:200])
+            except Exception as e:
+                LOG.warning("ingest DELETE %s failed: %s", name, e)
 
     def _push_all(self, names):
         for name in names:
