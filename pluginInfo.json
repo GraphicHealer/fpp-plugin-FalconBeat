@@ -7,6 +7,7 @@
 	"homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
 	"srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
 	"bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",
+	"documentation": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/blob/master/README.md",
 	"allowUpdates": 1,
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
@@ -15,7 +16,7 @@
 			{
 				"to": "the BeatSync/ingest server you configure",
 				"what": "show audio files, playback commands, room admin secret",
-				"why": "lets visitors' phones stream the show audio in sync with the lights",
+				"why": "to let visitors' phones stream the show audio in sync with the lights",
 				"alwaysOn": false
 			}
 		],
