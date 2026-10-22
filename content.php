@@ -25,6 +25,7 @@ $fields = array(
     array('nudgeMs',        'Extra Delay (ms)',   'text',     'Added to the computed schedule delay for the phone track offset. 0 = auto.'),
     array('gateMaxSec',     'Sync Gate (sec)',    'text',     'Hold each track\'s start until phones confirm loaded (max seconds). 0 = off.'),
     array('startLagMs',     'FPP Start Lag (ms)', 'text',     'How long FPP takes to actually start media after the gate releases — subtracted from the phone offset. Tune by ear.'),
+    array('preloadSettleMs','Phone Preload Settle (ms)', 'text','When a track is pushed at play time, wait this long before PLAY so phones can download over WAN. Counts against the sync gate. 0 = off.'),
     array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
 );
 
@@ -33,6 +34,7 @@ $defaults = array(
     'roomId' => '000000',
     'gateMaxSec' => '10',
     'startLagMs' => '250',
+    'preloadSettleMs' => '2500',
 );
 
 function fb_get($key, $default = '') {
