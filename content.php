@@ -4,6 +4,9 @@
  *
  * Settings are stored the FPP way: config/plugin.fpp-plugin-FalconBeat
  * via WriteSettingToFile, read back with ReadSettingFromFile.
+ *
+ * Saving (or the Test button) probes: ingest /health + bearer token,
+ * BeatSync /health + WS upgrade, and the public media URL.
  */
 
 $pluginName = 'fpp-plugin-FalconBeat';
@@ -44,35 +47,156 @@ function fb_get($key, $default = '') {
     return $default;
 }
 
-$saved = false;
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_save'])) {
-    foreach ($fields as $f) {
-        $key = $f[0];
-        if ($f[2] === 'checkbox') {
-            $value = isset($_POST[$key]) ? '1' : '0';
-        } else {
-            $value = isset($_POST[$key]) ? trim($_POST[$key]) : '';
-        }
-        if (function_exists('WriteSettingToFile')) {
-            WriteSettingToFile($key, $value, $pluginName);
-        } else {
-            // direct write fallback
-            global $settings;
-            $cfgDir = isset($settings['configDirectory']) ? $settings['configDirectory'] : '/home/fpp/media/config';
-            $file = $cfgDir . '/plugin.' . $pluginName;
-            $lines = is_readable($file) ? file($file) : array();
-            $found = false;
-            foreach ($lines as $i => $line) {
-                if (strpos(trim($line), $key . '=') === 0) {
-                    $lines[$i] = $key . ' = "' . str_replace('"', '', $value) . '"' . "\n";
-                    $found = true;
-                }
-            }
-            if (!$found) $lines[] = $key . ' = "' . str_replace('"', '', $value) . '"' . "\n";
-            file_put_contents($file, implode('', $lines), LOCK_EX);
-        }
+/**
+ * Minimal HTTP probe. Returns array(httpCode|0, errorString).
+ * Prefers curl (always present in FPP's PHP), falls back to streams.
+ */
+function fb_http($method, $url, $headers = array(), $body = null, $timeout = 4) {
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        if ($code === 0) return array(0, $err ?: 'connection failed');
+        return array($code, '');
     }
-    $saved = true;
+    // streams fallback
+    $h = implode("\r\n", $headers);
+    $ctx = stream_context_create(array('http' => array(
+        'method' => $method, 'header' => $h, 'content' => $body,
+        'timeout' => $timeout, 'ignore_errors' => true,
+    )));
+    $resp = @file_get_contents($url, false, $ctx);
+    if ($resp === false) return array(0, 'connection failed');
+    $code = 0;
+    if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', $http_response_header[0], $m))
+        $code = (int)$m[1];
+    return array($code, '');
+}
+
+/**
+ * WS upgrade probe — checks the server answers 101 Switching Protocols.
+ * ws:// only (direct LAN); returns 'skip' for wss.
+ */
+function fb_ws_probe($wsUrl, $query, $timeout = 4) {
+    $u = parse_url($wsUrl);
+    if (!$u || !isset($u['host'])) return array(false, 'bad URL');
+    if ($u['scheme'] !== 'ws') return array(false, 'skipped (wss — check in browser)');
+    $port = isset($u['port']) ? $u['port'] : 80;
+    $fp = @fsockopen($u['host'], $port, $errno, $errstr, $timeout);
+    if (!$fp) return array(false, $errstr ?: 'connection refused');
+    stream_set_timeout($fp, $timeout);
+    $key = base64_encode(random_bytes(16));
+    $path = '/ws?' . $query;
+    $req = "GET $path HTTP/1.1\r\nHost: {$u['host']}:$port\r\n" .
+           "Upgrade: websocket\r\nConnection: Upgrade\r\n" .
+           "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    fwrite($fp, $req);
+    $line = fgets($fp);
+    fclose($fp);
+    if ($line === false) return array(false, 'no response');
+    return array(strpos($line, ' 101') !== false, trim($line));
+}
+
+function fb_tests($v) {
+    // $v: array of saved setting values
+    $results = array();
+
+    // 1. ingest reachability
+    $ingest = rtrim($v['ingestUrl'], '/');
+    list($code, $err) = fb_http('GET', $ingest . '/health');
+    $results[] = array('Ingest reachable', $code === 200,
+        $code ? "HTTP $code" : $err);
+
+    // 2. ingest token — PUT with deliberately invalid JSON: auth is checked
+    //    before the body is parsed, so 400 = token accepted, 401 = rejected.
+    //    Nothing is written either way.
+    $auth = array('Authorization: Bearer ' . $v['ingestToken'],
+                  'Content-Type: application/json');
+    list($code, $err) = fb_http('PUT', $ingest . '/config/show', $auth, 'x');
+    $ok = ($code === 400); // invalid-JSON past the auth gate
+    $results[] = array('Ingest token', $ok,
+        $code === 401 ? 'unauthorized — check INGEST_TOKEN'
+          : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
+
+    // 3. beatsync HTTP /health
+    $httpBase = preg_replace('/^ws/', 'http', rtrim($v['beatsyncUrl'], '/'));
+    list($code, $err) = fb_http('GET', $httpBase . '/health');
+    $results[] = array('BeatSync reachable', $code === 200,
+        $code ? "HTTP $code" : $err);
+
+    // 4. beatsync WS upgrade (room auto-creates; secret validity shows up as
+    //    admin status, not the handshake — a 101 means the socket works)
+    $q = http_build_query(array(
+        'roomId' => $v['roomId'], 'username' => 'fpp-config-test',
+        'clientId' => 'cfgtest', 'creator' => $v['creatorSecret'],
+        'admin' => $v['adminSecret']));
+    list($ok, $detail) = fb_ws_probe($v['beatsyncUrl'], $q);
+    $results[] = array('BeatSync WebSocket', $ok, $detail);
+
+    // 5. public media URL — any HTTP answer (even 404 before the first track)
+    //    proves the public route works; a transport error means it doesn't.
+    if ($v['mediaPublicUrl'] !== '') {
+        list($code, $err) = fb_http('GET',
+            rtrim($v['mediaPublicUrl'], '/') . '/nowplaying.json');
+        $results[] = array('Public media URL', $code > 0,
+            $code ? "HTTP $code" . ($code === 404 ? ' (no track pushed yet — fine)' : '')
+                  : $err);
+    }
+
+    return $results;
+}
+
+$saved = false;
+$testResults = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['fb_save'])) {
+        foreach ($fields as $f) {
+            $key = $f[0];
+            if ($f[2] === 'checkbox') {
+                $value = isset($_POST[$key]) ? '1' : '0';
+            } else {
+                $value = isset($_POST[$key]) ? trim($_POST[$key]) : '';
+            }
+            if (function_exists('WriteSettingToFile')) {
+                WriteSettingToFile($key, $value, $pluginName);
+            } else {
+                // direct write fallback
+                global $settings;
+                $cfgDir = isset($settings['configDirectory']) ? $settings['configDirectory'] : '/home/fpp/media/config';
+                $file = $cfgDir . '/plugin.' . $pluginName;
+                $lines = is_readable($file) ? file($file) : array();
+                $found = false;
+                foreach ($lines as $i => $line) {
+                    if (strpos(trim($line), $key . '=') === 0) {
+                        $lines[$i] = $key . ' = "' . str_replace('"', '', $value) . '"' . "\n";
+                        $found = true;
+                    }
+                }
+                if (!$found) $lines[] = $key . ' = "' . str_replace('"', '', $value) . '"' . "\n";
+                file_put_contents($file, implode('', $lines), LOCK_EX);
+            }
+        }
+        $saved = true;
+        $testResults = 'auto'; // run the checks with the just-saved values
+    }
+    if (isset($_POST['fb_test'])) {
+        $testResults = 'manual'; // probe whatever is currently saved
+    }
+}
+
+if ($testResults !== null) {
+    $v = array();
+    foreach ($fields as $f) $v[$f[0]] = fb_get($f[0]);
+    $testResults = fb_tests($v);
 }
 ?>
 
@@ -86,6 +210,21 @@ entries run.
 
 <?php if ($saved): ?>
 <div class="alert alert-success">Settings saved. Changes take effect on the next playlist/media event.</div>
+<?php endif; ?>
+
+<?php if (is_array($testResults)): ?>
+<h4>Connection test</h4>
+<table class="table table-striped" style="max-width: 720px;">
+<?php foreach ($testResults as $r): ?>
+<tr>
+    <td style="width:200px;"><b><?php echo htmlspecialchars($r[0]); ?></b></td>
+    <td><?php echo $r[1]
+        ? '<span class="text-success">&#10003; ok</span>'
+        : '<span class="text-danger">&#10007; failed</span>'; ?>
+        <small class="text-muted"><?php echo htmlspecialchars($r[2]); ?></small></td>
+</tr>
+<?php endforeach; ?>
+</table>
 <?php endif; ?>
 
 <form method="post" action="">
@@ -108,5 +247,6 @@ entries run.
 </tr>
 <?php endforeach; ?>
 </table>
-<button type="submit" name="fb_save" value="1" class="btn btn-primary">Save</button>
+<button type="submit" name="fb_save" value="1" class="btn btn-primary">Save &amp; Test</button>
+<button type="submit" name="fb_test" value="1" class="btn btn-default">Test saved settings</button>
 </form>

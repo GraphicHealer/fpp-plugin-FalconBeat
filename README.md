@@ -25,7 +25,11 @@ fppd ──media/playlist events──▶ callbacks.py ──unix socket──�
 - `falconbeatd.py` — zero-dependency Python daemon. Holds the BeatSync admin
   WebSocket open for the duration of a playlist (a room with no clients is
   deleted after 60s), pushes playlist audio to the ingest service, registers
-  each track with `POST /upload/complete`, and issues PLAY/PAUSE.
+  each track with `POST /upload/complete`, and issues PLAY/PAUSE. It also
+  PUTs `nowplaying.json` to ingest on every media/stop event (heartbeating
+  every 30s while playing) so the listener page shows title/artist and an
+  off-air banner, and reports the live non-admin listener count on the
+  status page.
 - `scripts/postStart.sh` / `preStop.sh` — start/stop the daemon with fppd.
 - `content.php` — settings page (Content Setup → FalconBeat).
 - `status.php` — live status (Status/Control → FalconBeat Status).

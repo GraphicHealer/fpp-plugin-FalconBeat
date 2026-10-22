@@ -263,6 +263,15 @@ def epoch_ms():
     return int(time.time() * 1000)
 
 
+def http_request(method, url, body=None, headers=None, timeout=15):
+    """Plain HTTP helper (stdlib). Returns (status, response bytes)."""
+    req = urllib.request.Request(url, method=method, data=body)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, r.read()
+
+
 class BeatSyncSession:
     """One admin WS connection to the BeatSync server, with background reader,
     NTP probing (coded probe pairs per shared/types), liveness replies, and
@@ -292,6 +301,7 @@ class BeatSyncSession:
         self.best_rtt_ms = None
         self.max_client_rtt_ms = 0.0
         self.max_client_comp_ms = 0.0
+        self.listener_count = 0  # non-admin clients (phones), not our socket
         self.registered_urls = set()  # sources the room knows (SET_AUDIO_SOURCES)
         self._ntp_req = {}  # probeGroupId -> [t0_first, t0_second]
         self._ntp_seq = 0
@@ -407,6 +417,8 @@ class BeatSyncSession:
                 self.max_client_comp_ms = max(
                     self.max_client_comp_ms, float(c.get("compensationMs", 0))
                 )
+            # Listener count = non-admin clients (our creator socket is admin)
+            self.listener_count = sum(1 for c in clients if not c.get("isAdmin"))
 
     # -- NTP (coded probe pairs; keep min-RTT sample's offset) ----------
 
@@ -523,11 +535,7 @@ class BeatSyncSession:
     # -- HTTP helpers ----------------------------------------------------
 
     def _http(self, method, url, body=None, headers=None, timeout=15):
-        req = urllib.request.Request(url, method=method, data=body)
-        for k, v in (headers or {}).items():
-            req.add_header(k, v)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read()
+        return http_request(method, url, body, headers, timeout)
 
     def register_source(self, media_name, public_url):
         """POST /upload/complete — binds the URL to the room and makes phones
@@ -658,6 +666,7 @@ class FalconBeatDaemon:
         self._push_lock = threading.Lock()
         self._pushing = {}  # media_name -> threading.Event (set when done)
         self._state_lock = threading.Lock()
+        self._np_doc = None  # last nowplaying doc pushed to ingest
 
     # -- session lifecycle ----------------------------------------------
 
@@ -723,6 +732,49 @@ class FalconBeatDaemon:
         self._disconnect_timer.daemon = True
         self._disconnect_timer.start()
 
+    # -- now-playing metadata (ingest /config/nowplaying) ------------------
+    # Contract: plugin PUTs {playing, title?, artist?, album?, filename,
+    # updatedAtMs} per media event and {playing:false} on stop. The listener
+    # page treats updatedAtMs stale >90s as off air, so we heartbeat every
+    # 30s while a track is playing.
+
+    NOWPLAYING_HEARTBEAT_S = 30.0
+
+    def _put_config(self, name, doc):
+        ingest = self.cfg["ingestUrl"].rstrip("/")
+        status, resp = http_request(
+            "PUT",
+            "%s/config/%s" % (ingest, name),
+            body=json.dumps(doc).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer %s" % self.cfg["ingestToken"],
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        if status >= 300:
+            raise RuntimeError(
+                "PUT /config/%s -> HTTP %d: %s" % (name, status, resp[:200])
+            )
+
+    def _set_nowplaying(self, doc):
+        self._np_doc = doc
+        try:
+            self._put_config("nowplaying", doc)
+        except Exception as e:
+            LOG.warning("nowplaying update failed: %s", e)
+
+    def _nowplaying_heartbeat(self):
+        while not self._shutdown.wait(self.NOWPLAYING_HEARTBEAT_S):
+            doc = self._np_doc
+            if not doc or not doc.get("playing"):
+                continue
+            doc["updatedAtMs"] = epoch_ms()
+            try:
+                self._put_config("nowplaying", doc)
+            except Exception as e:
+                LOG.warning("nowplaying heartbeat failed: %s", e)
+
     # -- push/register/play ----------------------------------------------
 
     def ensure_source(self, media_name):
@@ -770,8 +822,21 @@ class FalconBeatDaemon:
             self._registered.add(url)
         return url
 
-    def play(self, media_name):
+    def play(self, media_name, data=None):
         self._playlist_active = True
+        # Push now-playing first — the page can show the track even while
+        # phones are still loading the audio.
+        doc = {
+            "playing": True,
+            "filename": media_name,
+            "updatedAtMs": epoch_ms(),
+        }
+        for tag in ("title", "artist", "album"):
+            v = (data or {}).get(tag)
+            if v:
+                doc[tag] = v
+        self._set_nowplaying(doc)
+
         session = self._connect()
         url = self.ensure_source(media_name)
         pos, _playing = fpp_position_seconds()
@@ -807,6 +872,7 @@ class FalconBeatDaemon:
             LOG.warning("PAUSE failed: %s", e)
         self._current_source = None
         self._current_media = None
+        self._set_nowplaying({"playing": False, "updatedAtMs": epoch_ms()})
 
     # -- fppd events ------------------------------------------------------
 
@@ -847,6 +913,10 @@ class FalconBeatDaemon:
             LOG.info("playlist %s", action or "stop")
             self._playlist_active = False
             self.pause()
+            if self._np_doc and self._np_doc.get("playing"):
+                self._set_nowplaying(
+                    {"playing": False, "updatedAtMs": epoch_ms()}
+                )
             self._disconnect_later()
 
     def _push_all(self, names):
@@ -864,7 +934,7 @@ class FalconBeatDaemon:
         if entry_type in ("both", "media", "video") and media_name:
             # fresh media -> any pending disconnect is moot while a playlist runs
             try:
-                self.play(media_name)
+                self.play(media_name, data)
             except Exception as e:
                 LOG.exception("PLAY %s failed: %s", media_name, e)
         elif entry_type in ("pause", "sequence", "event"):
@@ -935,6 +1005,10 @@ class FalconBeatDaemon:
             "roomId": self.cfg.get("roomId"),
             "beatsyncUrl": self.cfg.get("beatsyncUrl"),
             "enabled": cfg_bool(self.cfg.get("enabled", "1")),
+            "listenerCount": (
+                self.session.listener_count if self.session else 0
+            ),
+            "nowPlaying": self._np_doc,
         }
         try:
             os.makedirs(DATADIR, exist_ok=True)
@@ -983,11 +1057,20 @@ class FalconBeatDaemon:
                 self._write_state()
 
         threading.Thread(target=state_writer, daemon=True).start()
+        threading.Thread(target=self._nowplaying_heartbeat, daemon=True).start()
 
         try:
             self._serve_control(srv)
         finally:
             state_thread_stop.set()
+            # leave a clean off-air marker so the listener page doesn't sit
+            # stale for up to 90s
+            try:
+                self._set_nowplaying(
+                    {"playing": False, "updatedAtMs": epoch_ms()}
+                )
+            except Exception:
+                pass
             self._write_state()
             if self.session:
                 self.session.close()

@@ -41,6 +41,17 @@ pip installs are system-wide across plugins).
   `POST http://beatsync:8080/upload/complete {roomId, originalName,
   publicUrl}` — phones then fetch `mediaPublicUrl/<name>` from Caddy.
   upload/complete is unauthenticated → stays LAN-only, never proxied.
+- Now-playing metadata (server commit e0a318b): plugin PUTs
+  `{ingest}/config/nowplaying` (Bearer) per media event —
+  `{playing, title?, artist?, album?, filename, updatedAtMs}` — and
+  `{playing:false}` on stop/pause/shutdown. Page treats `updatedAtMs` stale
+  >90s as off air → daemon heartbeats the doc every 30s while playing.
+  Rides plain ingest HTTP — no persistent WS needed for metadata.
+- Listener count = non-admin clients in `CLIENT_CHANGE` (our creator socket
+  is isAdmin → not counted). Surfaced in status.json → status.php.
+- Ingest test endpoints: `GET /health` → {status:ok}; token probe =
+  `PUT /config/show` with invalid JSON → 401 bad token / 400 good token
+  (auth checked before parse; nothing written). Beatsync has `/health` too.
 - `LIVENESS_PING` → reply `LIVENESS_PONG`; room dies 60s after last client
   leaves, so the WS is held for the playlist duration only.
 - NTP probes: `NTP_REQUEST {t0, probeGroupId, probeGroupIndex 0|1}` — pairs
