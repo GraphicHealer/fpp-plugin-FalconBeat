@@ -687,6 +687,7 @@ class FalconBeatDaemon:
         self._connect_lock = threading.Lock()  # serializes connect+re-register
         self._pushed = {}        # media_name -> public_url (uploaded this run)
         self._registered = set()  # urls registered on the room this connection
+        self._registered_at = {}  # url -> monotonic time of (re-)registration
         self._current_source = None
         self._current_media = None
         self._played_urls = set()  # sources that finished — pruned on next PLAY
@@ -707,6 +708,7 @@ class FalconBeatDaemon:
         if msg.get("type") == "_disconnected":
             LOG.info("BeatSync session dropped")
             self._registered.clear()
+            self._registered_at.clear()
             if self._playlist_active:
                 self._schedule_reconnect()
 
@@ -744,6 +746,7 @@ class FalconBeatDaemon:
                 try:
                     session.register_source(name, url)
                     self._registered.add(url)
+                    self._registered_at[url] = time.monotonic()
                 except Exception as e:
                     LOG.warning("re-register %s failed: %s", name, e)
             return session
@@ -758,6 +761,7 @@ class FalconBeatDaemon:
                     self.session.close()
                     self.session = None
                 self._registered.clear()
+                self._registered_at.clear()
 
         if self._disconnect_timer:
             self._disconnect_timer.cancel()
@@ -936,6 +940,7 @@ class FalconBeatDaemon:
         if url not in self._registered:
             self._connect().register_source(media_name, url)
             self._registered.add(url)
+            self._registered_at[url] = time.monotonic()
         return url
 
     def play(self, media_name, data=None, gated=False):
@@ -1001,12 +1006,15 @@ class FalconBeatDaemon:
         # clock doesn't start until PLAY arrives — give the download a head
         # start first so phones fit inside that window instead of missing
         # the intro. FPP stays gated the whole time either way.
-        if gated and just_registered:
-            settle = float(self.cfg.get("preloadSettleMs") or 0) / 1000.0
-            if settle > 0:
-                LOG.info("new source %s — settling %.2fs for phone download",
-                         media_name, settle)
-                time.sleep(settle)
+        settle = float(self.cfg.get("preloadSettleMs") or 0) / 1000.0
+        # Fresh means "registered within the settle window" — covers a URL
+        # the pre-push thread registered seconds ago at playlist start too,
+        # which is exactly when track 1 needs the head start.
+        fresh = time.monotonic() - self._registered_at.get(url, 0) < settle
+        if gated and settle > 0 and (just_registered or fresh):
+            LOG.info("new source %s — settling %.2fs for phone download",
+                     media_name, settle)
+            time.sleep(settle)
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
         )
@@ -1145,6 +1153,8 @@ class FalconBeatDaemon:
         with self._session_lock:
             session = self.session
         self._registered.difference_update(urls)
+        for u in urls:
+            self._registered_at.pop(u, None)
         sent = False
         if session is not None and session._connected.is_set():
             try:
