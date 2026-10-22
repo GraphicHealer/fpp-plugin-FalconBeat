@@ -720,6 +720,7 @@ class FalconBeatDaemon:
         self._played_urls = set()  # sources that finished — pruned on next PLAY
         self._queue = []           # ordered playlist media names (dupes kept)
         self._queue_idx = -1       # queue position of the current track
+        self._queue_fetch_fail = {}  # name -> monotonic ts of last failed fetch
         self._playlist_active = False
         self._disconnect_timer = None
         self._shutdown = threading.Event()
@@ -882,7 +883,7 @@ class FalconBeatDaemon:
                             pl = st.get("current_playlist") or ""
                             if isinstance(pl, dict):
                                 pl = pl.get("playlist") or ""
-                            self._queue = fpp_playlist_files(pl)
+                            self._fetch_queue(pl)
                             self._queue_idx = -1
                         failed_at = self._failed_media.get(song)
                         if failed_at and epoch_ms() - failed_at < \
@@ -908,6 +909,7 @@ class FalconBeatDaemon:
                         self._playlist_active = False
                         self._queue = []
                         self._queue_idx = -1
+                        self._queue_fetch_fail.clear()
                         self.pause()
                         if self._np_doc and self._np_doc.get("playing"):
                             self._set_nowplaying(
@@ -1179,6 +1181,7 @@ class FalconBeatDaemon:
         if action == "start":
             LOG.info("playlist start")
             self._playlist_active = True
+            self._queue_fetch_fail.clear()  # fresh playlist — retry the fetch
             if self._disconnect_timer:
                 self._disconnect_timer.cancel()
                 self._disconnect_timer = None
@@ -1216,12 +1219,8 @@ class FalconBeatDaemon:
                 # the source of truth for "next" — fetch it lazily if the
                 # start event missed us, then push queue[cursor+1] now
                 # rather than waiting for the next media event.
-                if not self._queue and data.get("name"):
-                    names = fpp_playlist_files(data["name"])
-                    if names:
-                        self._queue = names
-                        LOG.info("playlist queue (query_next): %d entries",
-                                 len(names))
+                if not self._queue:
+                    self._fetch_queue(data.get("name"))
                 if self._queue:
                     threading.Thread(
                         target=self._push_ahead, args=(self._queue_idx,),
@@ -1235,6 +1234,7 @@ class FalconBeatDaemon:
             self._playlist_active = False
             self._queue = []
             self._queue_idx = -1
+            self._queue_fetch_fail.clear()
             self.pause()
             if self._np_doc and self._np_doc.get("playing"):
                 self._set_nowplaying(
@@ -1305,6 +1305,22 @@ class FalconBeatDaemon:
                                 name, status, resp[:200])
             except Exception as e:
                 LOG.warning("ingest DELETE %s failed: %s", name, e)
+
+    def _fetch_queue(self, name):
+        """Populate _queue from the playlist API with a 60s failure backoff.
+        A sequence played directly has no file-backed playlist (404) — don't
+        re-request it every reconcile tick."""
+        if not name or self._queue:
+            return
+        if time.monotonic() - self._queue_fetch_fail.get(name, -61.0) < 60:
+            return
+        names = fpp_playlist_files(name)
+        if names:
+            self._queue = names
+            self._queue_fetch_fail.pop(name, None)
+            LOG.info("playlist queue: %d entries (%s)", len(names), name)
+        else:
+            self._queue_fetch_fail[name] = time.monotonic()
 
     def _push_start_window(self):
         """Playlist start: entries 0 and 1 both belong in the room — the
