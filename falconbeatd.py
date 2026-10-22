@@ -695,6 +695,7 @@ class FalconBeatDaemon:
         self._shutdown = threading.Event()
         self._push_lock = threading.Lock()
         self._pushing = {}  # media_name -> threading.Event (set when done)
+        self._push_errors = {}  # media_name -> last push failure (for waiters)
         self._state_lock = threading.Lock()
         self._np_doc = None  # last nowplaying doc pushed to ingest
         self._failed_media = {}  # filename -> epoch of last failed lookup
@@ -895,10 +896,17 @@ class FalconBeatDaemon:
                 else:
                     owner = False
             if not owner:
-                done.wait(120)
+                if not done.wait(120):
+                    raise TimeoutError(
+                        "push of %s still in flight after 120s" % media_name
+                    )
                 url = self._pushed.get(media_name)
                 if url is None:
-                    raise RuntimeError("push of %s failed in another thread" % media_name)
+                    raise RuntimeError(
+                        "push of %s failed in another thread: %s"
+                        % (media_name,
+                           self._push_errors.get(media_name, "unknown"))
+                    )
             else:
                 try:
                     path = find_media_file(media_name)
@@ -911,9 +919,18 @@ class FalconBeatDaemon:
                         path, os.path.basename(media_name)
                     )
                     self._pushed[media_name] = url
+                    self._push_errors.pop(media_name, None)
                     LOG.info("pushed: %s", url)
+                except Exception as e:
+                    self._push_errors[media_name] = e
+                    raise
                 finally:
                     done.set()
+                    # Drop the marker: waiters already hold the Event, and a
+                    # failed push must not permanently blacklist the file —
+                    # the next caller retries as owner.
+                    with self._push_lock:
+                        self._pushing.pop(media_name, None)
 
         url = self._pushed[media_name]
         if url not in self._registered:
