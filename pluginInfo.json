@@ -41,7 +41,7 @@
 		{
 			"minFPPVersion": "10.0",
 			"maxFPPVersion": "0",
-			"branch": "main",
+			"branch": "master",
 			"sha": ""
 		}
 	]
