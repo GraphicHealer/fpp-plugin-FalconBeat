@@ -9,12 +9,13 @@ server.
 
 <h4>How it works</h4>
 <ul>
-<li>When a playlist starts, every audio file it references is pushed to the
-FalconBeat ingest service and registered on the BeatSync room — phones
-preload them.</li>
-<li>When each media entry starts playing, a PLAY is scheduled on the room with
-the FPP playback position plus the server's computed lead time, so phones
-seek to the same point in the track.</li>
+<li>The room only ever holds two tracks: the one playing and the next. Each
+track's upload + registration happens during the previous song, so phones
+download it early — a skipped or finished track leaves the room (and the
+server's media dir) right away.</li>
+<li>When each media entry starts, FPP's start is held briefly while phones
+confirm the audio is loaded, then phones and FPP start position 0 at the
+same scheduled instant — a short, intentional gap between tracks.</li>
 <li>Pause-type entries, playlist pauses and stops send PAUSE.</li>
 <li>A short-lived admin connection per playlist keeps the room alive; it drops
 a few seconds after the playlist ends.</li>
