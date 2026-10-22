@@ -32,13 +32,13 @@ function fb_h($s) { return htmlspecialchars((string)$s); }
                              : '<span class="text-danger">not running</span>'; ?></td></tr>
 <?php if ($state): ?>
 <tr><td><b>Enabled</b></td><td><?php echo $state['enabled'] ? 'yes' : 'no'; ?></td></tr>
-<tr><td><b>BeatSync</b></td><td><?php echo fb_h($state['beatsyncUrl']); ?>
+<tr><td><b>FalconBeat</b></td><td><?php echo fb_h($state['beatsyncUrl']); ?>
     room <?php echo fb_h($state['roomId']); ?> —
     <?php echo $state['connected'] ? '<span class="text-success">connected</span>'
                                    : '<span class="text-muted">disconnected</span>'; ?></td></tr>
 <tr><td><b>Playlist active</b></td><td><?php echo $state['playlistActive'] ? 'yes' : 'no'; ?></td></tr>
 <tr><td><b>Listeners</b></td><td><?php echo fb_h(isset($state['listenerCount']) ? $state['listenerCount'] : '0'); ?>
-    <small class="text-muted">connected phones (non-admin)</small></td></tr>
+    <small class="text-muted">connected devices (non-admin)</small></td></tr>
 <tr><td><b>Now playing</b></td><td><?php echo fb_h($state['currentMedia'] ?: '—'); ?></td></tr>
 <?php if (isset($state['nowPlaying']) && is_array($state['nowPlaying'])):
     $np = $state['nowPlaying']; ?>

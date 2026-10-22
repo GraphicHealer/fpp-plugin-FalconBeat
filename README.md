@@ -1,66 +1,36 @@
 # fpp-plugin-FalconBeat
 
-FPP (Falcon Player) plugin that mirrors the show's audio to visitors' phones
-in sync, via a self-hosted [BeatSync](https://github.com/freeman-jiang/beatsync)
-server (the FalconBeat stack).
+FPP (Falcon Player) plugin that plays your light show's audio on visitors'
+devices, in sync with the sequence, through a self-hosted
+[FalconBeat](https://github.com/GraphicHealer/FalconBeat) server.
 
 ## How it works
 
-```
-fppd ──media/playlist events──▶ callbacks.py ──unix socket──▶ falconbeatd
-                                                                  │
-        PUT /media/<file> (Bearer)            POST /upload/complete│
-              ▼                                    ▼
-        FalconBeat ingest :8090            BeatSync :8080 (LAN only)
-                                                  │
-                                  ws://…/ws?roomId&creator=SECRET
-                                                  ▼
-                                    PLAY / PAUSE with trackTimeSeconds
-                                    = FPP position + computed delay
-```
+- fppd calls `callbacks.py` on media/playlist events; it forwards them to a
+  background daemon (`falconbeatd.py`) and exits.
+- The daemon holds the server's admin socket open for the playlist and
+  keeps a rolling two-track window: only the current and next tracks are
+  uploaded to ingest and registered on the room, so devices download each
+  track during the previous song instead of the whole show at once.
+- Each track start is gated until devices confirm the audio loaded; FPP and
+  the devices then start at the same scheduled instant. Pauses and stops
+  send PAUSE.
+- Played or skipped tracks are evicted from the room and deleted from
+  ingest. `nowplaying.json` (heartbeated while playing) drives the listener
+  page's title/artist and off-air banner; the status page shows the live
+  listener count.
 
-- `callbacks.py` — the file fppd calls (`--list`, `--type media|playlist
-  --data <json>`, `--type lifecycle startup|shutdown`). fppd blocks on these
-  calls, so it only forwards the event to the daemon and exits.
-- `falconbeatd.py` — zero-dependency Python daemon. Holds the BeatSync admin
-  WebSocket open for the duration of a playlist (a room with no clients is
-  deleted after 60s), and keeps a rolling lookahead window: only the current
-  and next playlist tracks are pushed to ingest + registered on the room, so
-  phones download each track while the previous one plays instead of hauling
-  the whole show at start. Played and skipped tracks are evicted from the
-  room and deleted from ingest. It also PUTs `nowplaying.json` to ingest on
-  every media/stop event (heartbeating every 30s while playing) so the
-  listener page shows title/artist and an off-air banner, and reports the
-  live non-admin listener count on the status page.
-- `scripts/postStart.sh` / `preStop.sh` — start/stop the daemon with fppd.
-- `content.php` — settings page (Content Setup → FalconBeat).
-- `status.php` — live status (Status/Control → FalconBeat Status).
+## Configure
 
-## Sync accuracy
-
-The daemon runs the same NTP probe protocol as phones (coded probe pairs,
-min-RTT offset kept) and tracks every client's RTT/compensation from
-`CLIENT_CHANGE` room events. On gated playlist starts the media callback
-holds FPP while phones load, sends PLAY with `trackTimeSeconds: 0`, and
-releases the callback just before `serverTimeToExecute` — phones and FPP
-start position 0 together, so the server's scheduling delay becomes a
-pause *between* tracks instead of skipped intro audio. On non-gated
-reconciles it sends FPP position + `max(400ms, 1.5·maxRTT+200,
-maxCompensation+200)` instead. `nudgeMs` adds a manual offset.
+Content Setup &rarr; FalconBeat: server WS URL, room ID, creator secret,
+ingest URL + token, and the public media URL devices fetch audio from.
+Status &rarr; FalconBeat Status shows the live connection state.
 
 ## Notes
 
-- PLAY is confirmed only by the `SCHEDULED_ACTION` echo — rejections are
-  silent server-side. Watch `Logs → plugin-fpp-plugin-FalconBeat.log`.
-- BeatSync room→source bindings are in-memory; after a server restart the
-  daemon re-registers pushed files on reconnect.
-- The admin WS, `/upload/complete`, and ingest are LAN-only by design; only
-  browsers reach the server through the public ingress.
-- Secrets (creator secret, ingest token, admin secret) are stored in
-  `plugindata/fpp-plugin-FalconBeat/secrets` mode `0600` — outside `config/`,
-  so backups and crash bundles never carry them.
-
-## Before publishing
-
-- `pluginInfo.json` points at `github.com/GraphicHealer/fpp-plugin-FalconBeat`
-  — the GitHub repo must be named `fpp-plugin-FalconBeat` to match `repoName`.
+- Secrets are stored in `plugindata/fpp-plugin-FalconBeat/secrets` mode
+  `0600` — never in `config/`, so backups and crash bundles don't carry
+  them.
+- Logs: File Manager &rarr; Logs &rarr; `plugin-fpp-plugin-FalconBeat.log`.
+- The admin socket, `/upload/complete`, and ingest are LAN-only by design;
+  only browsers reach the server through public ingress.

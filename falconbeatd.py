@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-FalconBeat daemon — keeps FPP playback mirrored to a BeatSync room.
+FalconBeat daemon — keeps FPP playback mirrored to a FalconBeat room.
 
 Run by FPP (postStart.sh / lifecycle callback). Speaks:
 
-  - BeatSync admin WS  (ws://<beatsync>/ws?roomId=..&creator=..) — held open
+  - FalconBeat admin WS (ws://<server>/ws?roomId=..&creator=..) — held open
     for the duration of a playlist so the room (deleted after 60s idle)
     stays alive and listeners stay attached.
-  - BeatSync HTTP      (POST /upload/complete — LAN only, unauthenticated)
+  - FalconBeat HTTP     (POST /upload/complete — LAN only, unauthenticated)
   - FalconBeat ingest  (PUT http://<ingest>:8090/media/<name>, Bearer token)
   - FPP status API     (GET http://127.0.0.1/api/fppd/status — position)
   - Local control      (unix socket: callbacks.py forwards fppd events)
 
 Protocol reference: FalconBeat-Server/bridge/src/client.ts and
-beatsync/packages/shared/types/*.ts (@ 94c38ab).
+FalconBeat-Server/beatsync/packages/shared/types/*.ts (@ 94c38ab).
 
 Stdlib only — FPP images ship python3; pip installs are system-wide and
 shared across plugins, so we deliberately keep zero dependencies.
@@ -70,20 +70,20 @@ DEFAULTS = {
     "ingestToken": "",
     "mediaPublicUrl": "",
     # Extra milliseconds added to the computed schedule delay when telling
-    # phones where in the track to start. Tune if phones run audibly late.
+    # devices where in the track to start. Tune if devices run audibly late.
     "nudgeMs": "0",
     # Seconds after a playlist stop before the admin WS drops (room GC'd ~60s
     # later regardless). Small grace lets listeners see the PAUSE land.
     "disconnectGraceSec": "5",
     # fppd blocks in the media callback inside PreparePlay — before the media
     # output exists. The callback waits on the daemon up to this many seconds
-    # for push + register + PLAY echo, so tracks can't start before phones
+    # for push + register + PLAY echo, so tracks can't start before devices
     # are ready. 0 disables gating.
     "gateMaxSec": "10",
     # Milliseconds between the gate releasing and FPP's media output actually
-    # starting — subtracted from the phone track offset on gated starts.
+    # starting — subtracted from the device track offset on gated starts.
     "startLagMs": "250",
-    # Phones fetch audio over the public internet; when a track was just
+    # Devices fetch audio over the public internet; when a track was just
     # registered, the server only holds its 3s load-coordination window once
     # PLAY is sent — a multi-MB download may not fit. On gated starts where
     # this URL was registered during this call, wait this long before sending
@@ -275,7 +275,7 @@ class MiniWS:
 
 
 # --------------------------------------------------------------------------
-# BeatSync session: persistent admin WS + push/register/play/pause
+# FalconBeat session: persistent admin WS + push/register/play/pause
 # --------------------------------------------------------------------------
 
 
@@ -292,8 +292,8 @@ def http_request(method, url, body=None, headers=None, timeout=15):
         return r.status, r.read()
 
 
-class BeatSyncSession:
-    """One admin WS connection to the BeatSync server, with background reader,
+class FalconBeatSession:
+    """One admin WS connection to the FalconBeat server, with background reader,
     NTP probing (coded probe pairs per shared/types), liveness replies, and
     SCHEDULED_ACTION echo matching for PLAY/PAUSE confirmation."""
 
@@ -321,7 +321,7 @@ class BeatSyncSession:
         self.best_rtt_ms = None
         self.max_client_rtt_ms = 0.0
         self.max_client_comp_ms = 0.0
-        self.listener_count = 0  # non-admin clients (phones), not our socket
+        self.listener_count = 0  # non-admin clients (devices), not our socket
         self.registered_urls = set()  # sources the room knows (SET_AUDIO_SOURCES)
         self._ntp_req = {}  # probeGroupId -> [t0_first, t0_second]
         self._ntp_seq = 0
@@ -367,7 +367,7 @@ class BeatSyncSession:
         )
         self._ntp_thread.start()
         self._connected.set()
-        LOG.info("BeatSync WS connected: %s room %s", ws_base, self.cfg["roomId"])
+        LOG.info("FalconBeat WS connected: %s room %s", ws_base, self.cfg["roomId"])
 
     def close(self):
         self._closed.set()
@@ -567,7 +567,7 @@ class BeatSyncSession:
         return http_request(method, url, body, headers, timeout)
 
     def register_source(self, media_name, public_url):
-        """POST /upload/complete — binds the URL to the room and makes phones
+        """POST /upload/complete — binds the URL to the room and makes devices
         preload it (SET_AUDIO_SOURCES)."""
         body = json.dumps(
             {
@@ -588,7 +588,7 @@ class BeatSyncSession:
             )
 
     def push_file(self, local_path, media_name):
-        """PUT file to ingest -> returns public URL phones will fetch."""
+        """PUT file to ingest -> returns public URL devices will fetch."""
         ingest = self.cfg["ingestUrl"].rstrip("/")
         quoted = urllib.parse.quote(media_name)
         with open(local_path, "rb") as f:
@@ -736,7 +736,7 @@ class FalconBeatDaemon:
 
     def _on_ws_event(self, msg):
         if msg.get("type") == "_disconnected":
-            LOG.info("BeatSync session dropped")
+            LOG.info("FalconBeat session dropped")
             self._registered.clear()
             self._registered_at.clear()
             if self._playlist_active:
@@ -764,7 +764,7 @@ class FalconBeatDaemon:
             with self._session_lock:
                 if self.session is None:
                     self.cfg = load_settings()
-                    self.session = BeatSyncSession(self.cfg, self._on_ws_event)
+                    self.session = FalconBeatSession(self.cfg, self._on_ws_event)
                 session = self.session
             if not session._connected.is_set():
                 session.connect()  # retry if the last attempt failed
@@ -788,7 +788,7 @@ class FalconBeatDaemon:
         def drop():
             with self._session_lock:
                 if self.session:
-                    LOG.info("dropping BeatSync session")
+                    LOG.info("dropping FalconBeat session")
                     self.session.close()
                     self.session = None
                 self._registered.clear()
@@ -998,7 +998,7 @@ class FalconBeatDaemon:
             return
         self._playlist_active = True
         # Push now-playing first — the page can show the track even while
-        # phones are still loading the audio.
+        # devices are still loading the audio.
         doc = {
             "playing": True,
             "filename": media_name,
@@ -1011,7 +1011,7 @@ class FalconBeatDaemon:
         self._set_nowplaying(doc)
 
         session = self._connect()
-        # Room membership check BEFORE ensure_source registers — phones start
+        # Room membership check BEFORE ensure_source registers — devices start
         # downloading on SET_AUDIO_SOURCES, so a URL registered during this
         # call means the download only just began.
         known_urls = set(self._registered)
@@ -1021,7 +1021,7 @@ class FalconBeatDaemon:
         if gated:
             # fppd is blocked in the media callback. We release it just before
             # serverTimeToExecute so FPP's media output starts at position 0
-            # at (almost) the same instant phones start at position 0 — the
+            # at (almost) the same instant devices start at position 0 — the
             # server's scheduling delay becomes a between-track pause instead
             # of missing intro audio.
             lag = float(self.cfg.get("startLagMs") or 0) / 1000.0
@@ -1033,7 +1033,7 @@ class FalconBeatDaemon:
             target = pos + delay
             LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f)",
                      media_name, target, pos, delay)
-        # Silence the previous track's tail while phones load the new one.
+        # Silence the previous track's tail while devices load the new one.
         old_source = self._current_source
         if old_source and old_source != url:
             try:
@@ -1046,10 +1046,10 @@ class FalconBeatDaemon:
                 )
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
-        # Freshly registered file + gated start: phones only just learned the
-        # URL and download it over WAN. The server's 3s load-coordination
+        # Freshly registered file + gated start: devices only just learned
+        # the URL and download it over WAN. The server's 3s load-coordination
         # clock doesn't start until PLAY arrives — give the download a head
-        # start first so phones fit inside that window instead of missing
+        # start first so devices fit inside that window instead of missing
         # the intro. FPP stays gated the whole time either way.
         settle = float(self.cfg.get("preloadSettleMs") or 0) / 1000.0
         # Fresh means "registered within the settle window" — covers a URL
@@ -1057,7 +1057,7 @@ class FalconBeatDaemon:
         # which is exactly when track 1 needs the head start.
         fresh = time.monotonic() - self._registered_at.get(url, 0) < settle
         if gated and settle > 0 and (just_registered or fresh):
-            LOG.info("new source %s — settling %.2fs for phone download",
+            LOG.info("new source %s — settling %.2fs for device download",
                      media_name, settle)
             time.sleep(settle)
         _t = time.monotonic()
@@ -1105,7 +1105,7 @@ class FalconBeatDaemon:
         exec_ms = echo.get("serverTimeToExecute")
         LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
         if gated:
-            # Hold the gate so FPP's media starts lag-ms before phones fire.
+            # Hold the gate so FPP's media starts lag-ms before devices fire.
             # Server delay is capped at 3s — cap the hold a bit above that.
             now_ms = session.server_now_ms()
             remaining_s = (exec_ms - now_ms) / 1000.0 if exec_ms else None
@@ -1240,7 +1240,7 @@ class FalconBeatDaemon:
                 self._set_nowplaying(
                     {"playing": False, "updatedAtMs": epoch_ms()}
                 )
-            # Empty the queue — phones get SET_AUDIO_SOURCES=[] and have
+            # Empty the queue — devices get SET_AUDIO_SOURCES=[] and have
             # nothing left to resume. Closest thing the protocol has to a
             # kick; with an empty queue the room is inert until next show.
             self._delete_room_sources(list(self._registered),
@@ -1252,7 +1252,7 @@ class FalconBeatDaemon:
 
     def _delete_room_sources(self, urls, reason=""):
         """DELETE_AUDIO_SOURCES — drops queue entries and broadcasts
-        SET_AUDIO_SOURCES so phones unload them. Fire-and-forget (the reply
+        SET_AUDIO_SOURCES so devices unload them. Fire-and-forget (the reply
         is a ROOM_EVENT, not a SCHEDULED_ACTION echo). Evicted files are
         also removed from the ingest media dir so the volume doesn't fill
         with played tracks."""
@@ -1321,7 +1321,7 @@ class FalconBeatDaemon:
 
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
-        registered — phones then download it while the current track plays,
+        registered — devices then download it while the current track plays,
         so the next gated PLAY doesn't wait on the WAN fetch."""
         if not self._playlist_active or self._shutdown.is_set():
             return

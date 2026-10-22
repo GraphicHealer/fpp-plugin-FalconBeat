@@ -160,7 +160,7 @@ def main(argv):
             return 1
         # Media callbacks are blocking inside fppd's PreparePlay — before the
         # media output exists. Holding our reply until the daemon finishes
-        # push + PLAY means the track can't start before phones are ready.
+        # push + PLAY means the track can't start before devices are ready.
         gate = gate_sec() if cb_type == "media" else 0.0
         payload = {"cb_type": cb_type, "data": data}
         if gate > 0:

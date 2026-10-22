@@ -6,7 +6,7 @@
  * via WriteSettingToFile, read back with ReadSettingFromFile.
  *
  * Saving (or the Test button) probes: ingest /health + bearer token,
- * BeatSync /health + WS upgrade, and the public media URL.
+ * FalconBeat /health + WS upgrade, and the public media URL.
  */
 
 $pluginName = 'fpp-plugin-FalconBeat';
@@ -36,18 +36,18 @@ function fb_secret_get($key) {
 $fields = array(
     // key, label, type, help text
     array('enabled',        'Enabled',            'checkbox', 'Master switch — when off, playback events are ignored.'),
-    array('beatsyncUrl',    'BeatSync WS URL',    'text',     'e.g. ws://falconbeat.local:8080 — LAN address of the BeatSync server (phones do not use this).'),
+    array('beatsyncUrl',    'FalconBeat WS URL',  'text',     'e.g. ws://falconbeat.local:8080 — LAN address of the FalconBeat server (devices do not use this).'),
     array('roomId',         'Room ID',            'text',     '6-digit room code, e.g. 000000.'),
-    array('creatorSecret',  'Creator Secret',     'password', 'CREATOR_SECRET on the BeatSync server (?creator= admin auth). LAN-only.'),
+    array('creatorSecret',  'Creator Secret',     'password', 'CREATOR_SECRET on the FalconBeat server (?creator= admin auth). LAN-only.'),
     array('adminSecret',    'Admin Secret',       'password', 'Optional: demo-mode ?admin= secret. Usually left blank.'),
     array('ingestUrl',      'Ingest URL',         'text',     'e.g. http://falconbeat.local:8090 — LAN media ingest service.'),
     array('ingestToken',    'Ingest Token',       'password', 'Bearer token for ingest PUTs. LAN-only.'),
-    array('mediaPublicUrl', 'Public Media URL',   'text',     'e.g. https://falconbeat.example.com/media — where phones fetch audio. Must end with /media.'),
+    array('mediaPublicUrl', 'Public Media URL',   'text',     'e.g. https://falconbeat.example.com/media — where devices fetch audio. Must end with /media.'),
     array('listenerUrl',    'Listener Page URL',  'text',     'Optional: public URL of the listener web app, shown on the status page.'),
-    array('nudgeMs',        'Extra Delay (ms)',   'text',     'Added to the computed schedule delay for the phone track offset. 0 = auto.'),
-    array('gateMaxSec',     'Sync Gate (sec)',    'text',     'Hold each track\'s start until phones confirm loaded (max seconds). 0 = off.'),
-    array('startLagMs',     'FPP Start Lag (ms)', 'text',     'How long FPP takes to actually start media after the gate releases — subtracted from the phone offset. Tune by ear.'),
-    array('preloadSettleMs','Phone Preload Settle (ms)', 'text','When a track is pushed at play time, wait this long before PLAY so phones can download over WAN. Counts against the sync gate. 0 = off.'),
+    array('nudgeMs',        'Extra Delay (ms)',   'text',     'Added to the computed schedule delay for the device track offset. 0 = auto.'),
+    array('gateMaxSec',     'Sync Gate (sec)',    'text',     'Hold each track\'s start until devices confirm loaded (max seconds). 0 = off.'),
+    array('startLagMs',     'FPP Start Lag (ms)', 'text',     'How long FPP takes to actually start media after the gate releases — subtracted from the device offset. Tune by ear.'),
+    array('preloadSettleMs','Preload Settle (ms)', 'text',    'When a track is pushed at play time, wait this long before PLAY so devices can download over WAN. Counts against the sync gate. 0 = off.'),
     array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
 );
 
@@ -170,20 +170,20 @@ function fb_tests($v) {
               : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
     }
 
-    // 3. beatsync HTTP /health
+    // 3. falconbeat HTTP /health
     $httpBase = preg_replace('/^ws/', 'http', rtrim($v['beatsyncUrl'], '/'));
     list($code, $err) = fb_http('GET', $httpBase . '/health');
-    $results[] = array('BeatSync reachable', $code === 200,
+    $results[] = array('FalconBeat reachable', $code === 200,
         $code ? "HTTP $code" : $err);
 
-    // 4. beatsync WS upgrade (room auto-creates; secret validity shows up as
+    // 4. falconbeat WS upgrade (room auto-creates; secret validity shows up as
     //    admin status, not the handshake — a 101 means the socket works)
     $q = http_build_query(array(
         'roomId' => $v['roomId'], 'username' => 'fpp-config-test',
         'clientId' => 'cfgtest', 'creator' => $v['creatorSecret'],
         'admin' => $v['adminSecret']));
     list($ok, $detail) = fb_ws_probe($v['beatsyncUrl'], $q);
-    $results[] = array('BeatSync WebSocket', $ok, $detail);
+    $results[] = array('FalconBeat WebSocket', $ok, $detail);
 
     // 5. public media URL — any HTTP answer (even 404 before the first track)
     //    proves the public route works; a transport error means it doesn't.
@@ -272,10 +272,10 @@ if ($testResults === 'auto') {
 
 <h2>FalconBeat</h2>
 <p>
-Mirrors FPP playback to a BeatSync room so visitors' phones play the show audio
-in sync. Audio files are pushed to the FalconBeat ingest service at playlist
-start, then PLAY/PAUSE is issued over the BeatSync admin socket as media
-entries run.
+Mirrors FPP playback to a FalconBeat room so visitors' devices play the show
+audio in sync. Audio files are pushed to the ingest service at playlist start,
+then PLAY/PAUSE is issued over the FalconBeat admin socket as media entries
+run.
 </p>
 
 <?php if ($saved): ?>

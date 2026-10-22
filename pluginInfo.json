@@ -3,7 +3,7 @@
 	"repoName": "fpp-plugin-FalconBeat",
 	"name": "FalconBeat",
 	"author": "GraphicHealer",
-	"description": "Falcon Player plugin that broadcasts a light show's audio and now-playing info to a FalconBeat server.",
+	"description": "Plays your show's audio on visitors' devices, in sync with the lights, via a self-hosted FalconBeat server.",
 	"homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
 	"srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
 	"bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",
@@ -11,12 +11,12 @@
 	"allowUpdates": 1,
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
-		"summary": "Sends your show audio files and play/pause commands to the FalconBeat server address you configure, so visitors' can play the show audio from their own devices in perfect sync.",
+		"summary": "Sends your show audio and play/pause commands to the FalconBeat server you configure, so visitors can listen in sync on their own devices.",
 		"sends": [
 			{
 				"to": "the FalconBeat server you configure",
 				"what": "show audio files, playback commands, room admin secret",
-				"why": "to let visitors' devices stream the show audio in sync with the lights",
+				"why": "to let visitors' devices play the show audio in sync with the lights",
 				"alwaysOn": false
 			}
 		],
@@ -26,15 +26,15 @@
 		"systemChanges": [
 			{
 				"kind": "service",
-				"what": "runs a background Python daemon (falconbeatd) while fppd is running; listens only on a local unix socket"
+				"what": "runs a Python daemon (falconbeatd) while fppd runs; local unix socket only"
 			},
 			{
 				"kind": "core-settings",
-				"what": "sets FPP's restartFlag on install/upgrade so fppd restarts and loads the new plugin code"
+				"what": "sets restartFlag on install/upgrade so fppd reloads the new plugin code"
 			}
 		],
 		"closedCode": false,
-		"other": "Your secrets are stored under plugindata mode 0600, not in the shared config directory. The daemon's local control channel is a unix socket; nothing listens on the network."
+		"other": "Secrets are stored mode-0600 under plugindata, outside the shared config directory; the daemon listens only on a local unix socket."
 	},
 	"versions": [
 		{

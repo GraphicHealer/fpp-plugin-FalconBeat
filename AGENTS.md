@@ -1,7 +1,7 @@
 # fpp-plugin-FalconBeat
 
-FPP plugin: mirrors show audio to visitors' phones via a self-hosted BeatSync
-server. Sibling project `../FalconBeat-Server` holds the server, ingest
+FPP plugin: mirrors show audio to visitors' devices via a self-hosted
+FalconBeat server. Sibling project `../FalconBeat-Server` holds the server, ingest
 service and `bridge/` — the canonical protocol reference this plugin
 replicates in Python (stdlib only, zero deps — FPP images ship python3 and
 pip installs are system-wide across plugins).
@@ -9,7 +9,7 @@ pip installs are system-wide across plugins).
 ## Layout
 
 - `callbacks.py` — fppd entry point, keep it FAST (fppd waitpid()s on it)
-- `falconbeatd.py` — the daemon: MiniWS client + BeatSync session + control socket
+- `falconbeatd.py` — the daemon: MiniWS client + FalconBeat session + control socket
 - `content.php` / `status.php` / `about.php` + `menu.inc` — FPP UI
 - `scripts/{fpp_install,fpp_uninstall,postStart,preStop}.sh` — lifecycle
 - `pluginInfo.json` — strict JSON (no comments); `repoName` must equal the
@@ -32,7 +32,7 @@ pip installs are system-wide across plugins).
   entry shapes; `type:"playlist"` entries only expand via mergeSubs).
 - `--type lifecycle startup|shutdown` — no --data. Waited max 5s.
 
-## BeatSync protocol (beatsync @ 94c38ab)
+## FalconBeat server protocol (server beatsync submodule @ 94c38ab)
 
 - WS: `ws://host:8080/ws?roomId&username&clientId&creator=SECRET` (non-demo;
   `?admin=` is demo-only). Plaintext JSON messages, not binary.
@@ -44,17 +44,17 @@ pip installs are system-wide across plugins).
   maxCompensation+200)`ms capped 3s (we compute it from CLIENT_CHANGE stats
   + our own NTP RTT; `nudgeMs` setting adds on top).
 - Server load-coordination clock starts at PLAY: it waits ≤3s for client
-  AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Phones fetch audio
+  AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Devices fetch audio
   over WAN — a freshly registered URL may not fit in 3s → they SYNC in
-  late at the right offset (observed: "phone starts ~3s late, synced").
+  late at the right offset (observed: "device starts ~3s late, synced").
   `preloadSettleMs` (default 2500) sleeps before PLAY on gated starts when
   the URL was registered within the settle window (tracked via
   `_registered_at`) — covers both a URL registered during that call and
   one the playlist-start pre-push registered seconds earlier; the gate
   holds FPP meanwhile (counts against gateMaxSec).
 - Push flow (no S3): `PUT http://ingest:8090/media/<name>` (Bearer) →
-  `POST http://beatsync:8080/upload/complete {roomId, originalName,
-  publicUrl}` — phones then fetch `mediaPublicUrl/<name>` from Caddy.
+  `POST http://falconbeat:8080/upload/complete {roomId, originalName,
+  publicUrl}` — devices then fetch `mediaPublicUrl/<name>` from Caddy.
   upload/complete is unauthenticated → stays LAN-only, never proxied.
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
@@ -62,7 +62,7 @@ pip installs are system-wide across plugins).
   callback's `name`, then `current_playlist` in `/api/fppd/status`) and
   pushes entries 0+1 at start; each PLAY then
   advances the cursor and pushes `queue[idx+1]` in the background so
-  phones download during the current track. Every PLAY also evicts registered sources outside
+  devices download during the current track. Every PLAY also evicts registered sources outside
   {current, next} — played tracks, parked (paused) sources, AND tracks
   skipped mid-list all leave the room + get DELETE'd from ingest.
   `query_next` fires when the current entry finishes (its `Item` is the
@@ -79,7 +79,7 @@ pip installs are system-wide across plugins).
   is isAdmin → not counted). Surfaced in status.json → status.php.
 - Ingest test endpoints: `GET /health` → {status:ok}; token probe =
   `PUT /config/show` with invalid JSON → 401 bad token / 400 good token
-  (auth checked before parse; nothing written). Beatsync has `/health` too.
+  (auth checked before parse; nothing written). The server has `/health` too.
 - `LIVENESS_PING` → reply `LIVENESS_PONG`; room dies 60s after last client
   leaves, so the WS is held for the playlist duration only.
 - NTP probes: `NTP_REQUEST {t0, probeGroupId, probeGroupIndex 0|1}` — pairs
@@ -98,7 +98,7 @@ python -m py_compile falconbeatd.py callbacks.py
 # back from unix socket to a localhost TCP port written to falconbeatd.port).
 # The throwaway script isn't in the repo — recreate from fbtest.py (kept in
 # the dev machine's temp dir): it
-# spins up fake ingest (:18090), fake beatsync WS+HTTP (:18080), fake fppd
+# spins up fake ingest (:18090), fake falconbeat WS+HTTP (:18080), fake fppd
 # status (:13232), starts the daemon and drives playlist/media events.
 # Verified: PUT ingest, upload/complete, NTP pairs, LIVENESS_PONG,
 # PLAY(fpp pos + delay), PAUSE on stop, graceful shutdown.
