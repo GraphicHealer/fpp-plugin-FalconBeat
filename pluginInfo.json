@@ -3,7 +3,7 @@
 	"repoName": "fpp-plugin-FalconBeat",
 	"name": "FalconBeat",
 	"author": "GraphicHealer",
-	"description": "Plays your show's audio on visitors' devices, in sync with the lights, via a self-hosted FalconBeat server.",
+	"description": "A self-hosted way to play your show's audio on visitors' devices, in sync with the lights — through a server you run yourself.",
 	"homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
 	"srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
 	"bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",

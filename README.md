@@ -1,8 +1,9 @@
 # fpp-plugin-FalconBeat
 
-FPP (Falcon Player) plugin that plays your light show's audio on visitors'
-devices, in sync with the sequence, through a self-hosted
-[FalconBeat](https://github.com/GraphicHealer/FalconBeat) server.
+A self-hosted way to put your light show's audio on your visitors' devices:
+they open your listener page, press play, and hear the soundtrack in sync
+with the sequence — served entirely by infrastructure you control, through
+the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 
 ## How it works
 
