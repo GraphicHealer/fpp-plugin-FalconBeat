@@ -673,6 +673,7 @@ class FalconBeatDaemon:
         self._registered = set()  # urls registered on the room this connection
         self._current_source = None
         self._current_media = None
+        self._played_urls = set()  # sources that finished — pruned on next PLAY
         self._playlist_active = False
         self._disconnect_timer = None
         self._shutdown = threading.Event()
@@ -851,6 +852,8 @@ class FalconBeatDaemon:
                             self._set_nowplaying(
                                 {"playing": False, "updatedAtMs": epoch_ms()}
                             )
+                        self._delete_room_sources(
+                            list(self._registered), reason="show stopped")
                         self._disconnect_later()
             except Exception as e:
                 LOG.warning("reconcile error: %s", e)
@@ -942,12 +945,13 @@ class FalconBeatDaemon:
             LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f)",
                      media_name, target, pos, delay)
         # Silence the previous track's tail while phones load the new one.
-        if self._current_source and self._current_source != url:
+        old_source = self._current_source
+        if old_source and old_source != url:
             try:
                 session.send_command(
                     {
                         "type": "PAUSE",
-                        "audioSource": self._current_source,
+                        "audioSource": old_source,
                         "trackTimeSeconds": 0.0,
                     }
                 )
@@ -958,6 +962,14 @@ class FalconBeatDaemon:
         )
         self._current_source = url
         self._current_media = media_name
+        # Every played source leaves the room queue — late joiners only
+        # preload the current + upcoming songs, not the whole show history.
+        stale = self._played_urls - {url}
+        if old_source and old_source != url:
+            stale.add(old_source)
+        self._played_urls = set()
+        if stale:
+            self._delete_room_sources(sorted(stale), reason="played")
         exec_ms = echo.get("serverTimeToExecute")
         LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
         if gated and exec_ms:
@@ -991,6 +1003,8 @@ class FalconBeatDaemon:
             LOG.info("PAUSE %s @ %.2fs", self._current_source, target)
         except Exception as e:
             LOG.warning("PAUSE failed: %s", e)
+        if self._current_source:
+            self._played_urls.add(self._current_source)
         self._current_source = None
         self._current_media = None
         self._set_nowplaying({"playing": False, "updatedAtMs": epoch_ms()})
@@ -1045,10 +1059,34 @@ class FalconBeatDaemon:
                 self._set_nowplaying(
                     {"playing": False, "updatedAtMs": epoch_ms()}
                 )
+            # Empty the queue — phones get SET_AUDIO_SOURCES=[] and have
+            # nothing left to resume. Closest thing the protocol has to a
+            # kick; with an empty queue the room is inert until next show.
+            self._delete_room_sources(list(self._registered),
+                                      reason="show stopped")
             self._disconnect_later()
         else:
             LOG.info("playlist %s (unhandled)", action or "unknown")
         return True
+
+    def _delete_room_sources(self, urls, reason=""):
+        """DELETE_AUDIO_SOURCES — drops queue entries and broadcasts
+        SET_AUDIO_SOURCES so phones unload them. Fire-and-forget (the reply
+        is a ROOM_EVENT, not a SCHEDULED_ACTION echo)."""
+        urls = [u for u in urls if u]
+        if not urls:
+            return
+        with self._session_lock:
+            session = self.session
+        self._registered.difference_update(urls)
+        if session is None or not session._connected.is_set():
+            return
+        try:
+            session._send({"type": "DELETE_AUDIO_SOURCES", "urls": urls})
+            LOG.info("deleted %d room source(s)%s", len(urls),
+                     " (%s)" % reason if reason else "")
+        except Exception as e:
+            LOG.warning("DELETE_AUDIO_SOURCES failed: %s", e)
 
     def _push_all(self, names):
         for name in names:
