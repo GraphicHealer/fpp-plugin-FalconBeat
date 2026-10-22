@@ -49,6 +49,7 @@ SOCK_PATH = os.path.join(
 )
 PID_PATH = os.path.join(DATADIR, "falconbeatd.pid")
 STATE_PATH = os.path.join(DATADIR, "status.json")
+SECRETS_PATH = os.path.join(DATADIR, "secrets")
 SETTINGS_PATH = os.path.join(CFGDIR, "plugin." + PLUGIN_NAME)
 FPP_STATUS_URL = "http://127.0.0.1/api/fppd/status"
 
@@ -94,22 +95,26 @@ DEFAULTS = {
 
 def load_settings():
     settings = dict(DEFAULTS)
-    try:
-        with open(SETTINGS_PATH, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip()
-                if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-                    value = value[1:-1]
-                settings[key] = value
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        LOG.warning("cannot read %s: %s", SETTINGS_PATH, e)
+    # config/plugin.* first, then plugindata/secrets (0600) on top —
+    # credentials live outside config/ so backups and crash bundles
+    # never carry them (PLUGIN_GUIDELINES §14.11).
+    for path in (SETTINGS_PATH, SECRETS_PATH):
+        try:
+            with open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+                        value = value[1:-1]
+                    settings[key] = value
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            LOG.warning("cannot read %s: %s", path, e)
     return settings
 
 

@@ -13,7 +13,10 @@ if [ -f "${DATADIR}/falconbeatd.pid" ]; then
     kill "$(cat "${DATADIR}/falconbeatd.pid")" 2>/dev/null || true
 fi
 
-# Socket, pidfile, status.json — all ours
+# Socket, pidfile, status.json, secrets file — all ours
 rm -rf "${DATADIR}"
+
+# Our settings file under config/
+rm -f "${MEDIADIR}/config/plugin.fpp-plugin-FalconBeat"
 
 # The single plugin log is left for FPP to rotate/purge as usual.

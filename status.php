@@ -26,8 +26,8 @@ function fb_h($s) { return htmlspecialchars((string)$s); }
 
 <h2>FalconBeat Status</h2>
 
-<table class="table table-striped" style="max-width: 720px;">
-<tr><td style="width:220px;"><b>Daemon</b></td>
+<table class="table table-striped">
+<tr><td><b>Daemon</b></td>
     <td><?php echo $running ? '<span class="text-success">running</span>'
                              : '<span class="text-danger">not running</span>'; ?></td></tr>
 <?php if ($state): ?>

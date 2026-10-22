@@ -11,6 +11,28 @@
 
 $pluginName = 'fpp-plugin-FalconBeat';
 
+// Credentials live under plugindata/ mode 0600, never in config/ (§14.11).
+$secretKeys = array('creatorSecret', 'adminSecret', 'ingestToken');
+
+function fb_secrets_path() {
+    global $settings, $pluginName;
+    $dir = isset($settings['mediaDirectory']) ? $settings['mediaDirectory'] : '/home/fpp/media';
+    return $dir . '/plugindata/' . $pluginName . '/secrets';
+}
+
+function fb_secret_get($key) {
+    $file = fb_secrets_path();
+    if (is_readable($file)) {
+        foreach (file($file) as $line) {
+            $line = trim($line);
+            if ($line === '' || strpos($line, '=') === false) continue;
+            list($k, $v) = explode('=', $line, 2);
+            if (trim($k) === $key) return trim(trim($v), '"');
+        }
+    }
+    return null;
+}
+
 $fields = array(
     // key, label, type, help text
     array('enabled',        'Enabled',            'checkbox', 'Master switch — when off, playback events are ignored.'),
@@ -38,7 +60,12 @@ $defaults = array(
 );
 
 function fb_get($key, $default = '') {
-    global $pluginName;
+    global $pluginName, $secretKeys;
+    if (in_array($key, $secretKeys)) {
+        $v = fb_secret_get($key);
+        if ($v !== null && $v !== '') return $v;
+        // fall through — config may still hold a pre-migration value
+    }
     if (function_exists('ReadSettingFromFile')) {
         $v = ReadSettingFromFile($key, $pluginName);
         if ($v !== false && $v !== null) return $v;
@@ -170,12 +197,17 @@ $saved = false;
 $testResults = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['fb_save'])) {
+        $secrets = array();
         foreach ($fields as $f) {
             $key = $f[0];
             if ($f[2] === 'checkbox') {
                 $value = isset($_POST[$key]) ? '1' : '0';
             } else {
                 $value = isset($_POST[$key]) ? trim($_POST[$key]) : '';
+            }
+            if (in_array($key, $secretKeys)) {
+                $secrets[$key] = $value;
+                $value = ''; // clear any legacy value out of config/
             }
             if (function_exists('WriteSettingToFile')) {
                 WriteSettingToFile($key, $value, $pluginName);
@@ -196,6 +228,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 file_put_contents($file, implode('', $lines), LOCK_EX);
             }
         }
+        $sfile = fb_secrets_path();
+        $sdir = dirname($sfile);
+        if (!is_dir($sdir)) @mkdir($sdir, 0755, true);
+        $body = '';
+        foreach ($secrets as $k => $v)
+            $body .= $k . ' = "' . str_replace('"', '', $v) . "\"\n";
+        file_put_contents($sfile, $body, LOCK_EX);
+        @chmod($sfile, 0600);
         $saved = true;
         $testResults = 'auto'; // run the checks with the just-saved values
     }
@@ -225,10 +265,10 @@ entries run.
 
 <?php if (is_array($testResults)): ?>
 <h4>Connection test</h4>
-<table class="table table-striped" style="max-width: 720px;">
+<table class="table table-striped">
 <?php foreach ($testResults as $r): ?>
 <tr>
-    <td style="width:200px;"><b><?php echo htmlspecialchars($r[0]); ?></b></td>
+    <td><b><?php echo htmlspecialchars($r[0]); ?></b></td>
     <td><?php echo $r[1]
         ? '<span class="text-success">&#10003; ok</span>'
         : '<span class="text-danger">&#10007; failed</span>'; ?>
@@ -239,13 +279,13 @@ entries run.
 <?php endif; ?>
 
 <form method="post" action="">
-<table class="table table-striped" style="max-width: 720px;">
+<table class="table table-striped">
 <?php foreach ($fields as $f):
     $key = $f[0]; $label = $f[1]; $type = $f[2]; $help = $f[3];
     $val = fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
 ?>
 <tr>
-    <td style="width: 200px;"><b><?php echo htmlspecialchars($label); ?></b></td>
+    <td><b><?php echo htmlspecialchars($label); ?></b></td>
     <td>
         <?php if ($type === 'checkbox'): ?>
         <input type="checkbox" name="<?php echo $key; ?>" value="1" <?php echo ($val === '1') ? 'checked' : ''; ?>>
