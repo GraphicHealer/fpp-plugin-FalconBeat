@@ -65,6 +65,12 @@ pip installs are system-wide across plugins).
   devices download during the current track. Every PLAY also evicts registered sources outside
   {current, next} — played tracks, parked (paused) sources, AND tracks
   skipped mid-list all leave the room + get DELETE'd from ingest.
+  Eviction pops `_pushed`/`_registered` atomically under `_reg_lock`
+  AFTER the DELETE frame sends — an evicted source must never again be
+  eligible for `_connect()`'s re-register recovery (which re-registers
+  ONLY the {current, next} keep-set and evicts any other `_pushed`
+  entry). A failed ingest file-DELETE goes to `_pending_file_dels` and
+  retries on the next eviction.
   `query_next` fires when the current entry finishes (its `Item` is the
   finished index): it lazy-fetches the queue if start missed us, then
   pushes `queue[cursor+1]` — the true next entry.

@@ -712,8 +712,9 @@ class FalconBeatDaemon:
         self.session = None
         self._session_lock = threading.Lock()  # guards self.session reference
         self._connect_lock = threading.Lock()  # serializes connect+re-register
-        self._pushed = {}        # media_name -> public_url (uploaded this run)
+        self._pushed = {}        # media_name -> public_url (uploaded, room-live)
         self._registered = set()  # urls registered on the room this connection
+        self._pending_file_dels = set()  # names whose ingest DELETE failed
         self._registered_at = {}  # url -> monotonic time of (re-)registration
         self._current_source = None
         self._current_media = None
@@ -770,9 +771,22 @@ class FalconBeatDaemon:
             if not session._connected.is_set():
                 session.connect()  # retry if the last attempt failed
             # Server-side restarts forget room->source bindings; re-register
-            # everything we've uploaded so files already on disk stay usable.
+            # the live window only (current + next). Anything else in
+            # _pushed is stale — re-registering it re-adds evicted tracks to
+            # the room, so evict it instead.
+            keep = set()
+            if self._current_source:
+                keep.add(self._current_source)
+            if 0 <= self._queue_idx + 1 < len(self._queue):
+                nxt_url = self._pushed.get(self._queue[self._queue_idx + 1])
+                if nxt_url:
+                    keep.add(nxt_url)
+            stale = []
             with self._reg_lock:
                 for name, url in list(self._pushed.items()):
+                    if url not in keep:
+                        stale.append(url)
+                        continue
                     if url in self._registered:
                         continue
                     try:
@@ -781,6 +795,8 @@ class FalconBeatDaemon:
                         self._registered_at[url] = time.monotonic()
                     except Exception as e:
                         LOG.warning("re-register %s failed: %s", name, e)
+            if stale:
+                self._delete_room_sources(stale, reason="stale after reconnect")
             return session
 
     def _disconnect_later(self):
@@ -1261,32 +1277,38 @@ class FalconBeatDaemon:
             return
         with self._session_lock:
             session = self.session
-        self._registered.difference_update(urls)
-        for u in urls:
-            self._registered_at.pop(u, None)
-        sent = False
-        if session is not None and session._connected.is_set():
+        live = session is not None and session._connected.is_set()
+        if live:
             try:
                 session._send({"type": "DELETE_AUDIO_SOURCES", "urls": urls})
-                sent = True
                 LOG.info("deleted %d room source(s)%s", len(urls),
                          " (%s)" % reason if reason else "")
             except Exception as e:
+                # Room still lists the sources — keep the bookkeeping so the
+                # next eviction or reconnect retries instead of orphaning.
                 LOG.warning("DELETE_AUDIO_SOURCES failed: %s", e)
-        # Only drop the files when the room eviction went out (or the room is
-        # dead anyway) — a failed send with a live session would leave the
-        # room pointing at deleted files.
-        if sent or session is None or not session._connected.is_set():
-            self._delete_media_files(urls)
+                return
+        # Eviction reached the room (or there is no live room). Forget the
+        # bindings atomically: _pushed.pop and _registered.discard under one
+        # lock, so _connect()'s re-register loop can never observe a source
+        # that is in _pushed but not _registered and resurrect it.
+        urlset = set(urls)
+        with self._reg_lock:
+            names = [n for n, u in self._pushed.items() if u in urlset]
+            for n in names:
+                self._pushed.pop(n, None)
+            self._registered.difference_update(urls)
+            for u in urls:
+                self._registered_at.pop(u, None)
+        if names:
+            self._delete_media_files(names)
 
-    def _delete_media_files(self, urls):
-        """DELETE evicted files via ingest and forget them in _pushed so a
-        later play re-uploads from scratch."""
-        names = {n for n, u in self._pushed.items() if u in urls}
-        if not names:
-            return
+    def _delete_media_files(self, names):
+        """DELETE evicted files via ingest. Failures go to
+        _pending_file_dels and are retried on the next call — a lingering
+        file is harmless but shouldn't leak forever."""
         ingest = self.cfg["ingestUrl"].rstrip("/")
-        for name in names:
+        for name in self._pending_file_dels | set(names):
             try:
                 quoted = urllib.parse.quote(os.path.basename(name))
                 status, resp = http_request(
@@ -1299,12 +1321,16 @@ class FalconBeatDaemon:
                 )
                 if status < 300:
                     LOG.info("deleted media file %s", name)
-                    self._pushed.pop(name, None)
+                    self._pending_file_dels.discard(name)
+                elif status == 404:
+                    self._pending_file_dels.discard(name)
                 else:
                     LOG.warning("ingest DELETE %s -> HTTP %d: %s",
                                 name, status, resp[:200])
+                    self._pending_file_dels.add(name)
             except Exception as e:
                 LOG.warning("ingest DELETE %s failed: %s", name, e)
+                self._pending_file_dels.add(name)
 
     def _fetch_queue(self, name):
         """Populate _queue from the playlist API with a 60s failure backoff.
