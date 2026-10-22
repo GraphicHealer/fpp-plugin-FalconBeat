@@ -1037,7 +1037,6 @@ class FalconBeatDaemon:
                 )
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
-        _t = time.monotonic()
         # Freshly registered file + gated start: phones only just learned the
         # URL and download it over WAN. The server's 3s load-coordination
         # clock doesn't start until PLAY arrives — give the download a head
@@ -1052,6 +1051,7 @@ class FalconBeatDaemon:
             LOG.info("new source %s — settling %.2fs for phone download",
                      media_name, settle)
             time.sleep(settle)
+        _t = time.monotonic()
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
         )
