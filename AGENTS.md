@@ -52,12 +52,16 @@ pip installs are system-wide across plugins).
   upload/complete is unauthenticated → stays LAN-only, never proxied.
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
-  payload, else `GET /api/playlist/<name>` via current_playlist in
-  `/api/fppd/status`) and pushes entries 0+1 at start; each PLAY then
+  payload top-level, then nested `playlist`/`Playlist`/`playlistData`
+  objects, then `GET /api/playlist/<name>` by name — callback name keys
+  first, then `current_playlist` in `/api/fppd/status`) and pushes
+  entries 0+1 at start; each PLAY then
   advances the cursor and pushes `queue[idx+1]` in the background so
   phones download during the current track. Every PLAY also evicts registered sources outside
   {current, next} — played tracks, parked (paused) sources, AND tracks
   skipped mid-list all leave the room + get DELETE'd from ingest.
+  `query_next` also fires an opportunistic ensure_source for its Item's
+  mediaFilename (belt-and-suspenders even without a queue).
   ensure_source stays the on-demand fallback for manual plays.
 - Now-playing metadata (server commit e0a318b): plugin PUTs
   `{ingest}/config/nowplaying` (Bearer) per media event —

@@ -668,6 +668,16 @@ def playlist_media_files(playlist):
     return names
 
 
+def entry_media_name(entry):
+    """mediaFilename from a single playlist entry dict (schema varies)."""
+    if not isinstance(entry, dict):
+        return None
+    media = entry.get("media")
+    if isinstance(media, dict) and media.get("mediaFilename"):
+        return media.get("mediaFilename")
+    return entry.get("mediaFilename") or entry.get("Media")
+
+
 def fpp_playlist_files(name):
     """Ordered media filenames for a named playlist via the FPP API —
     fallback when the playlist callback didn't carry the entry list."""
@@ -1166,13 +1176,26 @@ class FalconBeatDaemon:
             self._connect()
             names = playlist_media_files(data)
             if not names:
-                # Callback didn't carry the entry list — fetch by name.
-                names = fpp_playlist_files(
-                    data.get("Playlist") or data.get("playlistName")
-                    or data.get("name") or data.get("playlist")
-                )
+                # Maybe the playlist object is nested under a key.
+                for key in ("playlist", "Playlist", "playlistData"):
+                    if isinstance(data.get(key), dict):
+                        names = playlist_media_files(data[key])
+                        if names:
+                            break
+            if not names:
+                # No entry list at all — fetch the playlist by name.
+                pl = (data.get("Playlist") or data.get("playlistName")
+                      or data.get("name"))
+                if not pl:
+                    st = fpp_status() or {}
+                    pl = st.get("current_playlist") or ""
+                    if isinstance(pl, dict):
+                        pl = pl.get("playlist") or ""
+                names = fpp_playlist_files(pl)
             self._queue = names
-            self._queue_idx = -1
+            LOG.info("playlist queue: %d entries%s", len(names),
+                     "" if names else " (keys: %s) — lookahead disabled"
+                     % ",".join(sorted(data.keys())))
             if names:
                 threading.Thread(
                     target=self._push_start_window, daemon=True
@@ -1182,6 +1205,16 @@ class FalconBeatDaemon:
             # query_next is FPP's next-item hook. Neither ends playback.
             LOG.info("playlist %s", action)
             self._playlist_active = True
+            if action == "query_next":
+                # FPP is preparing the next entry — if its Item carries the
+                # media name, start that upload now (belt & suspenders for
+                # the queue lookahead, and a fallback when the queue failed).
+                name = entry_media_name(data.get("Item")) or \
+                    entry_media_name(data)
+                if name:
+                    threading.Thread(
+                        target=self._ensure_quiet, args=(name,), daemon=True
+                    ).start()
         elif action in ("pause", "paused"):
             LOG.info("playlist paused")
             self.pause()
@@ -1273,6 +1306,12 @@ class FalconBeatDaemon:
                 self.ensure_source(self._queue[i])
             except Exception as e:
                 LOG.warning("start push %s failed: %s", self._queue[i], e)
+
+    def _ensure_quiet(self, media_name):
+        try:
+            self.ensure_source(media_name)
+        except Exception as e:
+            LOG.warning("early push %s failed: %s", media_name, e)
 
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
