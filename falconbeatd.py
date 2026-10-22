@@ -957,9 +957,11 @@ class FalconBeatDaemon:
                 )
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
+        _t = time.monotonic()
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
         )
+        LOG.info("[dbg] PLAY->echo %.2fs", time.monotonic() - _t)
         self._current_source = url
         self._current_media = media_name
         # Every played source leaves the room queue — late joiners only
