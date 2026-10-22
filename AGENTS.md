@@ -50,6 +50,15 @@ pip installs are system-wide across plugins).
   `POST http://beatsync:8080/upload/complete {roomId, originalName,
   publicUrl}` — phones then fetch `mediaPublicUrl/<name>` from Caddy.
   upload/complete is unauthenticated → stays LAN-only, never proxied.
+- Rolling lookahead, not bulk pre-push: the room only ever holds
+  {current, next}. Playlist `start` stores the ordered queue (callback
+  payload, else `GET /api/playlist/<name>` via current_playlist in
+  `/api/fppd/status`) and pushes entry 0; each PLAY advances the cursor
+  and pushes `queue[idx+1]` in the background so phones download during
+  the current track. Every PLAY also evicts registered sources outside
+  {current, next} — played tracks, parked (paused) sources, AND tracks
+  skipped mid-list all leave the room + get DELETE'd from ingest.
+  ensure_source stays the on-demand fallback for manual plays.
 - Now-playing metadata (server commit e0a318b): plugin PUTs
   `{ingest}/config/nowplaying` (Bearer) per media event —
   `{playing, title?, artist?, album?, filename, updatedAtMs}` — and

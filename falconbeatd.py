@@ -650,7 +650,8 @@ def fpp_position_seconds():
 
 
 def playlist_media_files(playlist):
-    """All media filenames referenced by a playlist JSON (any section)."""
+    """Ordered media filenames referenced by a playlist JSON (any section).
+    Repeats are kept — lookahead needs real entry order to find "next"."""
     names = []
     for section in ("leadIn", "mainPlaylist", "leadOut"):
         for entry in playlist.get(section) or []:
@@ -664,14 +665,21 @@ def playlist_media_files(playlist):
                 name = entry.get("mediaFilename")
             if name:
                 names.append(name)
-    # de-dupe, preserve order
-    seen = set()
-    out = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
+    return names
+
+
+def fpp_playlist_files(name):
+    """Ordered media filenames for a named playlist via the FPP API —
+    fallback when the playlist callback didn't carry the entry list."""
+    if not name:
+        return []
+    try:
+        url = "http://127.0.0.1/api/playlist/%s" % urllib.parse.quote(str(name))
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return playlist_media_files(json.loads(r.read()))
+    except Exception as e:
+        LOG.warning("playlist %s fetch failed: %s", name, e)
+        return []
 
 
 # --------------------------------------------------------------------------
@@ -691,10 +699,13 @@ class FalconBeatDaemon:
         self._current_source = None
         self._current_media = None
         self._played_urls = set()  # sources that finished — pruned on next PLAY
+        self._queue = []           # ordered playlist media names (dupes kept)
+        self._queue_idx = -1       # queue position of the current track
         self._playlist_active = False
         self._disconnect_timer = None
         self._shutdown = threading.Event()
         self._push_lock = threading.Lock()
+        self._reg_lock = threading.Lock()  # serialize register_source checks
         self._pushing = {}  # media_name -> threading.Event (set when done)
         self._push_errors = {}  # media_name -> last push failure (for waiters)
         self._state_lock = threading.Lock()
@@ -740,15 +751,16 @@ class FalconBeatDaemon:
                 session.connect()  # retry if the last attempt failed
             # Server-side restarts forget room->source bindings; re-register
             # everything we've uploaded so files already on disk stay usable.
-            for name, url in list(self._pushed.items()):
-                if url in self._registered:
-                    continue
-                try:
-                    session.register_source(name, url)
-                    self._registered.add(url)
-                    self._registered_at[url] = time.monotonic()
-                except Exception as e:
-                    LOG.warning("re-register %s failed: %s", name, e)
+            with self._reg_lock:
+                for name, url in list(self._pushed.items()):
+                    if url in self._registered:
+                        continue
+                    try:
+                        session.register_source(name, url)
+                        self._registered.add(url)
+                        self._registered_at[url] = time.monotonic()
+                    except Exception as e:
+                        LOG.warning("re-register %s failed: %s", name, e)
             return session
 
     def _disconnect_later(self):
@@ -846,6 +858,13 @@ class FalconBeatDaemon:
                             self._disconnect_timer = None
                     if status_name == "playing" and song and \
                             song != self._current_media:
+                        if not self._queue:
+                            # Attached mid-playlist (missed the start event)
+                            pl = st.get("current_playlist") or ""
+                            if isinstance(pl, dict):
+                                pl = pl.get("playlist") or ""
+                            self._queue = fpp_playlist_files(pl)
+                            self._queue_idx = -1
                         failed_at = self._failed_media.get(song)
                         if failed_at and epoch_ms() - failed_at < \
                                 self.FAILED_RETRY_S * 1000:
@@ -868,6 +887,8 @@ class FalconBeatDaemon:
                         LOG.info("fppd %s — reconciling to stopped",
                                  status_name)
                         self._playlist_active = False
+                        self._queue = []
+                        self._queue_idx = -1
                         self.pause()
                         if self._np_doc and self._np_doc.get("playing"):
                             self._set_nowplaying(
@@ -938,9 +959,15 @@ class FalconBeatDaemon:
 
         url = self._pushed[media_name]
         if url not in self._registered:
-            self._connect().register_source(media_name, url)
-            self._registered.add(url)
-            self._registered_at[url] = time.monotonic()
+            # NB: take _connect() outside _reg_lock — _connect's re-register
+            # loop holds _connect_lock then wants _reg_lock; calling it here
+            # under _reg_lock would invert the order and can deadlock.
+            session = self._connect()
+            with self._reg_lock:
+                if url not in self._registered:
+                    session.register_source(media_name, url)
+                    self._registered.add(url)
+                    self._registered_at[url] = time.monotonic()
         return url
 
     def play(self, media_name, data=None, gated=False):
@@ -1021,14 +1048,41 @@ class FalconBeatDaemon:
         LOG.info("[dbg] PLAY->echo %.2fs", time.monotonic() - _t)
         self._current_source = url
         self._current_media = media_name
-        # Every played source leaves the room queue — late joiners only
-        # preload the current + upcoming songs, not the whole show history.
-        stale = self._played_urls - {url}
+        # Advance the playlist cursor: first matching entry strictly after
+        # the previous position (handles repeats and mid-list skips). If it
+        # only exists behind us the playlist looped — take the first match.
+        for i in range(max(0, self._queue_idx + 1), len(self._queue)):
+            if self._queue[i] == media_name:
+                self._queue_idx = i
+                break
+        else:
+            if media_name in self._queue:
+                self._queue_idx = self._queue.index(media_name)
+        # Upload+register the next entry while this one plays.
+        if self._queue:
+            threading.Thread(
+                target=self._push_ahead, args=(self._queue_idx,), daemon=True
+            ).start()
+        # Keep only {current, next} in the room — late joiners preload just
+        # the lookahead window, and skipped entries (cursor jumped past
+        # them) get evicted along with played ones.
+        keep_names = {media_name}
+        if 0 <= self._queue_idx + 1 < len(self._queue):
+            keep_names.add(self._queue[self._queue_idx + 1])
+        keep_urls = {
+            u for n, u in self._pushed.items()
+            if n in keep_names
+        }
         if old_source and old_source != url:
-            stale.add(old_source)
+            self._played_urls.add(old_source)
+        stale = self._played_urls - keep_urls
+        stale |= {
+            u for n, u in self._pushed.items()
+            if u in self._registered and u not in keep_urls
+        }
         self._played_urls = set()
         if stale:
-            self._delete_room_sources(sorted(stale), reason="played")
+            self._delete_room_sources(sorted(stale), reason="played/skipped")
         exec_ms = echo.get("serverTimeToExecute")
         LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
         if gated:
@@ -1111,9 +1165,17 @@ class FalconBeatDaemon:
                 self._disconnect_timer = None
             self._connect()
             names = playlist_media_files(data)
+            if not names:
+                # Callback didn't carry the entry list — fetch by name.
+                names = fpp_playlist_files(
+                    data.get("Playlist") or data.get("playlistName")
+                    or data.get("name") or data.get("playlist")
+                )
+            self._queue = names
+            self._queue_idx = -1
             if names:
                 threading.Thread(
-                    target=self._push_all, args=(names,), daemon=True
+                    target=self._push_ahead, args=(-1,), daemon=True
                 ).start()
         elif action in ("playing", "query_next"):
             # informational — playing confirms the playlist is live,
@@ -1126,6 +1188,8 @@ class FalconBeatDaemon:
         elif action in ("stop", "stopping", "stopped"):
             LOG.info("playlist %s", action)
             self._playlist_active = False
+            self._queue = []
+            self._queue_idx = -1
             self.pause()
             if self._np_doc and self._np_doc.get("playing"):
                 self._set_nowplaying(
@@ -1197,14 +1261,19 @@ class FalconBeatDaemon:
             except Exception as e:
                 LOG.warning("ingest DELETE %s failed: %s", name, e)
 
-    def _push_all(self, names):
-        for name in names:
-            if not self._playlist_active or self._shutdown.is_set():
-                return
+    def _push_ahead(self, idx):
+        """Ensure the playlist entry after queue position idx is uploaded +
+        registered — phones then download it while the current track plays,
+        so the next gated PLAY doesn't wait on the WAN fetch."""
+        if not self._playlist_active or self._shutdown.is_set():
+            return
+        nxt = idx + 1
+        if 0 <= nxt < len(self._queue):
             try:
-                self.ensure_source(name)
+                self.ensure_source(self._queue[nxt])
             except Exception as e:
-                LOG.warning("pre-push %s failed: %s", name, e)
+                LOG.warning("lookahead push %s failed: %s",
+                            self._queue[nxt], e)
 
     def _on_media(self, data):
         entry_type = str(data.get("type", "")).lower()
