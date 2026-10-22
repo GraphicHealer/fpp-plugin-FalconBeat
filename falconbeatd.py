@@ -983,13 +983,26 @@ class FalconBeatDaemon:
             self._delete_room_sources(sorted(stale), reason="played")
         exec_ms = echo.get("serverTimeToExecute")
         LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
-        if gated and exec_ms:
+        if gated:
             # Hold the gate so FPP's media starts lag-ms before phones fire.
             # Server delay is capped at 3s — cap the hold a bit above that.
-            wait = (exec_ms - session.server_now_ms()) / 1000.0 - lag
+            now_ms = session.server_now_ms()
+            remaining_s = (exec_ms - now_ms) / 1000.0 if exec_ms else None
+            LOG.info(
+                "[timing] server_now_ms=%.1f exec_ms=%s remaining_s=%s lag_s=%.3f",
+                now_ms, exec_ms, remaining_s, lag,
+            )
+            if exec_ms and session.best_rtt_ms is not None:
+                # NTP offset is measured — trust the server-clock delta.
+                wait = remaining_s - lag
+            else:
+                # No NTP offset yet (or no exec_ms): derive the hold from the
+                # delay we computed and the monotonic time since PLAY went out.
+                elapsed = time.monotonic() - _t
+                wait = delay - elapsed - lag
             wait = min(max(wait, 0.0), 3.5)
+            LOG.info("[timing] final gate wait=%.3fs", wait)
             if wait:
-                LOG.info("holding gate %.2fs until scheduled start", wait)
                 time.sleep(wait)
 
     def pause(self):
