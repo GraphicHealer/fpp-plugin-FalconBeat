@@ -1,9 +1,9 @@
 {
 	"$schema": "https://raw.githubusercontent.com/FalconChristmas/fpp-plugin-Template/master/pluginInfo.schema.json",
 	"repoName": "fpp-plugin-FalconBeat",
-	"name": "FalconBeat — synced show audio for phones",
+	"name": "FalconBeat",
 	"author": "GraphicHealer",
-	"description": "Plays your show's audio on visitors' phones in sync with the sequence: pushes playlist audio to a self-hosted BeatSync server and issues scheduled PLAY/PAUSE over its admin socket.",
+	"description": "Falcon Player plugin that broadcasts a light show's audio and now-playing info to a FalconBeat server.",
 	"homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
 	"srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
 	"bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",
@@ -11,12 +11,12 @@
 	"allowUpdates": 1,
 	"releaseNotesStyle": "gitHistory",
 	"privacy": {
-		"summary": "Sends your show audio files and play/pause commands to the BeatSync server address you configure, so visitors' phones can play the show audio in sync.",
+		"summary": "Sends your show audio files and play/pause commands to the FalconBeat server address you configure, so visitors' can play the show audio from their own devices in perfect sync.",
 		"sends": [
 			{
-				"to": "the BeatSync/ingest server you configure",
+				"to": "the FalconBeat server you configure",
 				"what": "show audio files, playback commands, room admin secret",
-				"why": "to let visitors' phones stream the show audio in sync with the lights",
+				"why": "to let visitors' devices stream the show audio in sync with the lights",
 				"alwaysOn": false
 			}
 		],
