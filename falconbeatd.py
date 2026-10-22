@@ -599,13 +599,18 @@ def find_media_file(name):
     return None
 
 
-def fpp_position_seconds():
-    """Current media position from the FPP status API. Returns (seconds, playing)."""
+def fpp_status():
+    """Full status dict from the FPP status API, or None if unreachable."""
     try:
         with urllib.request.urlopen(FPP_STATUS_URL, timeout=3) as r:
-            st = json.loads(r.read())
+            return json.loads(r.read())
     except Exception:
-        return 0.0, False
+        return None
+
+
+def fpp_position_seconds():
+    """Current media position from the FPP status API. Returns (seconds, playing)."""
+    st = fpp_status() or {}
     playing = st.get("status_name") == "playing" or st.get("status") == 1
     raw = st.get("seconds_played", 0)
     try:
@@ -667,6 +672,8 @@ class FalconBeatDaemon:
         self._pushing = {}  # media_name -> threading.Event (set when done)
         self._state_lock = threading.Lock()
         self._np_doc = None  # last nowplaying doc pushed to ingest
+        self._failed_media = {}  # filename -> epoch of last failed lookup
+        self._pb_lock = threading.Lock()  # serialize play()/pause()
 
     # -- session lifecycle ----------------------------------------------
 
@@ -775,6 +782,71 @@ class FalconBeatDaemon:
             except Exception as e:
                 LOG.warning("nowplaying heartbeat failed: %s", e)
 
+    # -- fppd status reconciler ------------------------------------------
+    # The callbacks only fire on NEW transitions: a playlist already playing
+    # when the daemon comes up (fppd restarted, schedule resumed mid-show,
+    # a callback missed entirely) would never reach us. Poll fppd every few
+    # seconds and converge — the event handlers dedupe on _current_media so
+    # this never double-fires PLAY.
+
+    RECONCILE_PERIOD_S = 3.0
+    FAILED_RETRY_S = 60.0
+
+    def _reconcile_loop(self):
+        while not self._shutdown.wait(self.RECONCILE_PERIOD_S):
+            try:
+                self.cfg = load_settings()
+                if not cfg_bool(self.cfg.get("enabled", "1")):
+                    continue
+                st = fpp_status()
+                if not st:
+                    continue
+                status_name = str(st.get("status_name", "")).lower()
+                song = st.get("current_song") or ""
+                if song in ("0", "none"):
+                    song = ""
+
+                if status_name in ("playing", "paused"):
+                    if not self._playlist_active:
+                        LOG.info("fppd %s — reconciling into active state",
+                                 status_name)
+                        self._playlist_active = True
+                        if self._disconnect_timer:
+                            self._disconnect_timer.cancel()
+                            self._disconnect_timer = None
+                    if status_name == "playing" and song and \
+                            song != self._current_media:
+                        failed_at = self._failed_media.get(song)
+                        if failed_at and epoch_ms() - failed_at < \
+                                self.FAILED_RETRY_S * 1000:
+                            continue
+                        try:
+                            self.play(song)
+                            self._failed_media.pop(song, None)
+                        except Exception as e:
+                            LOG.warning("reconcile PLAY %s failed: %s",
+                                        song, e)
+                            self._failed_media[song] = epoch_ms()
+                    elif status_name == "paused" and self._current_source:
+                        self.pause()
+                    elif status_name == "playing" and not song \
+                            and self._current_source:
+                        # sequence-only entry on air — park listeners
+                        self.pause()
+                elif status_name in ("idle", "stopping"):
+                    if self._playlist_active or self._current_source:
+                        LOG.info("fppd %s — reconciling to stopped",
+                                 status_name)
+                        self._playlist_active = False
+                        self.pause()
+                        if self._np_doc and self._np_doc.get("playing"):
+                            self._set_nowplaying(
+                                {"playing": False, "updatedAtMs": epoch_ms()}
+                            )
+                        self._disconnect_later()
+            except Exception as e:
+                LOG.warning("reconcile error: %s", e)
+
     # -- push/register/play ----------------------------------------------
 
     def ensure_source(self, media_name):
@@ -823,6 +895,10 @@ class FalconBeatDaemon:
         return url
 
     def play(self, media_name, data=None):
+        with self._pb_lock:
+            self._play(media_name, data)
+
+    def _play(self, media_name, data=None):
         self._playlist_active = True
         # Push now-playing first — the page can show the track even while
         # phones are still loading the audio.
@@ -853,6 +929,10 @@ class FalconBeatDaemon:
                  echo.get("serverTimeToExecute"))
 
     def pause(self):
+        with self._pb_lock:
+            self._pause()
+
+    def _pause(self):
         with self._session_lock:
             session = self.session
         if session is None or self._current_source is None:
@@ -1058,6 +1138,7 @@ class FalconBeatDaemon:
 
         threading.Thread(target=state_writer, daemon=True).start()
         threading.Thread(target=self._nowplaying_heartbeat, daemon=True).start()
+        threading.Thread(target=self._reconcile_loop, daemon=True).start()
 
         try:
             self._serve_control(srv)
