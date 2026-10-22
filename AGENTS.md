@@ -41,9 +41,11 @@ pip installs are system-wide across plugins).
   AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Phones fetch audio
   over WAN — a freshly registered URL may not fit in 3s → they SYNC in
   late at the right offset (observed: "phone starts ~3s late, synced").
-  `preloadSettleMs` (default 2500) sleeps before PLAY on gated starts where
-  the URL was registered during that call, giving the download a head
-  start; the gate holds FPP meanwhile (counts against gateMaxSec).
+  `preloadSettleMs` (default 2500) sleeps before PLAY on gated starts when
+  the URL was registered within the settle window (tracked via
+  `_registered_at`) — covers both a URL registered during that call and
+  one the playlist-start pre-push registered seconds earlier; the gate
+  holds FPP meanwhile (counts against gateMaxSec).
 - Push flow (no S3): `PUT http://ingest:8090/media/<name>` (Bearer) →
   `POST http://beatsync:8080/upload/complete {roomId, originalName,
   publicUrl}` — phones then fetch `mediaPublicUrl/<name>` from Caddy.
