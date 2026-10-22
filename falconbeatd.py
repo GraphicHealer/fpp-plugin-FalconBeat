@@ -927,15 +927,15 @@ class FalconBeatDaemon:
         url = self.ensure_source(media_name)
         delay = session.expected_delay_s()
         if gated:
-            # fppd is blocked in the media callback; the media output starts
-            # a short time (startLagMs) after we release it. Phones begin at
-            # serverTimeToExecute (~delay from now) at offset `target`, so
-            # target should equal the position FPP will reach by then:
-            # delay minus the media-startup lag.
+            # fppd is blocked in the media callback. We release it just before
+            # serverTimeToExecute so FPP's media output starts at position 0
+            # at (almost) the same instant phones start at position 0 — the
+            # server's scheduling delay becomes a between-track pause instead
+            # of missing intro audio.
             lag = float(self.cfg.get("startLagMs") or 0) / 1000.0
-            target = max(0.0, delay - lag)
-            LOG.info("PLAY %s @ %.2fs (gated: delay %.2f - lag %.2f)",
-                     media_name, target, delay, lag)
+            target = 0.0
+            LOG.info("PLAY %s @ 0s (gated; holding ~%.2fs)",
+                     media_name, delay)
         else:
             pos, _playing = fpp_position_seconds()
             target = pos + delay
@@ -958,8 +958,16 @@ class FalconBeatDaemon:
         )
         self._current_source = url
         self._current_media = media_name
-        LOG.info("PLAY confirmed, executes at server ts %s",
-                 echo.get("serverTimeToExecute"))
+        exec_ms = echo.get("serverTimeToExecute")
+        LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
+        if gated and exec_ms:
+            # Hold the gate so FPP's media starts lag-ms before phones fire.
+            # Server delay is capped at 3s — cap the hold a bit above that.
+            wait = (exec_ms - session.server_now_ms()) / 1000.0 - lag
+            wait = min(max(wait, 0.0), 3.5)
+            if wait:
+                LOG.info("holding gate %.2fs until scheduled start", wait)
+                time.sleep(wait)
 
     def pause(self):
         with self._pb_lock:
