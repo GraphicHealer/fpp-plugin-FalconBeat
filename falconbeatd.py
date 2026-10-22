@@ -1175,7 +1175,7 @@ class FalconBeatDaemon:
             self._queue_idx = -1
             if names:
                 threading.Thread(
-                    target=self._push_ahead, args=(-1,), daemon=True
+                    target=self._push_start_window, daemon=True
                 ).start()
         elif action in ("playing", "query_next"):
             # informational — playing confirms the playlist is live,
@@ -1260,6 +1260,19 @@ class FalconBeatDaemon:
                                 name, status, resp[:200])
             except Exception as e:
                 LOG.warning("ingest DELETE %s failed: %s", name, e)
+
+    def _push_start_window(self):
+        """Playlist start: entries 0 and 1 both belong in the room — the
+        lookahead then keeps {current, next} topped up from there."""
+        for i in range(2):
+            if i >= len(self._queue):
+                break
+            if not self._playlist_active or self._shutdown.is_set():
+                return
+            try:
+                self.ensure_source(self._queue[i])
+            except Exception as e:
+                LOG.warning("start push %s failed: %s", self._queue[i], e)
 
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
