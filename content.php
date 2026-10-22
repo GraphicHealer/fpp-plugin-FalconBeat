@@ -157,13 +157,18 @@ function fb_tests($v) {
     // 2. ingest token — PUT with deliberately invalid JSON: auth is checked
     //    before the body is parsed, so 400 = token accepted, 401 = rejected.
     //    Nothing is written either way.
-    $auth = array('Authorization: Bearer ' . $v['ingestToken'],
-                  'Content-Type: application/json');
-    list($code, $err) = fb_http('PUT', $ingest . '/config/show', $auth, 'x');
-    $ok = ($code === 400); // invalid-JSON past the auth gate
-    $results[] = array('Ingest token', $ok,
-        $code === 401 ? 'unauthorized — check INGEST_TOKEN'
-          : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
+    if ($v['ingestToken'] === '') {
+        $results[] = array('Ingest token', false,
+            'empty — nothing saved yet; type it above and Save & Test');
+    } else {
+        $auth = array('Authorization: Bearer ' . $v['ingestToken'],
+                      'Content-Type: application/json');
+        list($code, $err) = fb_http('PUT', $ingest . '/config/show', $auth, 'x');
+        $ok = ($code === 400); // invalid-JSON past the auth gate
+        $results[] = array('Ingest token', $ok,
+            $code === 401 ? 'unauthorized — check INGEST_TOKEN'
+              : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
+    }
 
     // 3. beatsync HTTP /health
     $httpBase = preg_replace('/^ws/', 'http', rtrim($v['beatsyncUrl'], '/'));
@@ -194,7 +199,9 @@ function fb_tests($v) {
 }
 
 $saved = false;
+$saveErr = null;
 $testResults = null;
+$formVals = null; // POSTed values, when the form should re-render them
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['fb_save'])) {
         $secrets = array();
@@ -234,17 +241,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $body = '';
         foreach ($secrets as $k => $v)
             $body .= $k . ' = "' . str_replace('"', '', $v) . "\"\n";
-        file_put_contents($sfile, $body, LOCK_EX);
+        if (file_put_contents($sfile, $body, LOCK_EX) === false) {
+            $saveErr = 'Could not write ' . $sfile .
+                ' — check plugindata permissions. Non-secret settings were saved.';
+        }
         @chmod($sfile, 0600);
         $saved = true;
         $testResults = 'auto'; // run the checks with the just-saved values
     }
     if (isset($_POST['fb_test'])) {
-        $testResults = 'manual'; // probe whatever is currently saved
+        // Test what is IN THE FORM — the saved values may not exist yet,
+        // and re-render the fields with what was typed so nothing is lost.
+        $formVals = array();
+        foreach ($fields as $f) {
+            $key = $f[0];
+            $formVals[$key] = ($f[2] === 'checkbox')
+                ? (isset($_POST[$key]) ? '1' : '0')
+                : (isset($_POST[$key]) ? trim($_POST[$key]) : '');
+        }
+        $testResults = fb_tests($formVals);
     }
 }
 
-if ($testResults !== null) {
+if ($testResults === 'auto') {
     $v = array();
     foreach ($fields as $f) $v[$f[0]] = fb_get($f[0]);
     $testResults = fb_tests($v);
@@ -261,6 +280,9 @@ entries run.
 
 <?php if ($saved): ?>
 <div class="alert alert-success">Settings saved. Changes take effect on the next playlist/media event.</div>
+<?php endif; ?>
+<?php if ($saveErr): ?>
+<div class="alert alert-danger"><?php echo htmlspecialchars($saveErr); ?></div>
 <?php endif; ?>
 
 <?php if (is_array($testResults)): ?>
@@ -282,7 +304,9 @@ entries run.
 <table class="table table-striped">
 <?php foreach ($fields as $f):
     $key = $f[0]; $label = $f[1]; $type = $f[2]; $help = $f[3];
-    $val = fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
+    $val = ($formVals !== null && array_key_exists($key, $formVals))
+        ? $formVals[$key]
+        : fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
 ?>
 <tr>
     <td><b><?php echo htmlspecialchars($label); ?></b></td>
@@ -299,5 +323,5 @@ entries run.
 <?php endforeach; ?>
 </table>
 <button type="submit" name="fb_save" value="1" class="btn btn-primary">Save &amp; Test</button>
-<button type="submit" name="fb_test" value="1" class="btn btn-default">Test saved settings</button>
+<button type="submit" name="fb_test" value="1" class="btn btn-default">Test these settings (no save)</button>
 </form>
