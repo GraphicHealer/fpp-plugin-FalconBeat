@@ -52,6 +52,5 @@ the scheduled action fires. `nudgeMs` adds a manual offset.
 
 ## Before publishing
 
-- `pluginInfo.json` `homeURL`/`srcURL`/`bugURL` are placeholders — point them
-  at the real GitHub repo (which must be named `fpp-plugin-FalconBeat` to
-  match `repoName`).
+- `pluginInfo.json` points at `github.com/GraphicHealer/fpp-plugin-FalconBeat`
+  — the GitHub repo must be named `fpp-plugin-FalconBeat` to match `repoName`.

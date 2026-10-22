@@ -13,8 +13,7 @@ pip installs are system-wide across plugins).
 - `content.php` / `status.php` / `about.php` + `menu.inc` — FPP UI
 - `scripts/{fpp_install,fpp_uninstall,postStart,preStop}.sh` — lifecycle
 - `pluginInfo.json` — strict JSON (no comments); `repoName` must equal the
-  GitHub repo name. `homeURL`/`srcURL`/`bugURL` are placeholders until the
-  repo exists.
+  GitHub repo name. URLs point at `github.com/GraphicHealer/fpp-plugin-FalconBeat`.
 
 ## FPP callback contract (verified in fpp src/Plugins.cpp)
 
@@ -57,8 +56,9 @@ pip installs are system-wide across plugins).
 python -m py_compile falconbeatd.py callbacks.py
 
 # Fake-stack integration test (works on Windows too — control channel falls
-# back from unix socket to a localhost TCP port written to falconbeatd.port):
-#   C:\Users\Garrett\AppData\Local\Temp\fbtest.py
+# back from unix socket to a localhost TCP port written to falconbeatd.port).
+# The throwaway script isn't in the repo — recreate from fbtest.py (kept in
+# the dev machine's temp dir): it
 # spins up fake ingest (:18090), fake beatsync WS+HTTP (:18080), fake fppd
 # status (:13232), starts the daemon and drives playlist/media events.
 # Verified: PUT ingest, upload/complete, NTP pairs, LIVENESS_PONG,
