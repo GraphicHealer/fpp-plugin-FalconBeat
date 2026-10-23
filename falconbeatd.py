@@ -744,6 +744,7 @@ class FalconBeatDaemon:
         self._played_urls = set()  # sources that finished — pruned on next PLAY
         self._queue = []           # ordered playlist media names (dupes kept)
         self._queue_idx = -1       # queue position of the current track
+        self._wrap_next = False    # playlist repeats — last entry's "next" is 0
         self._queue_fetch_fail = {}  # name -> monotonic ts of last failed fetch
         self._playlist_active = False
         self._disconnect_timer = None
@@ -800,8 +801,9 @@ class FalconBeatDaemon:
             keep = set()
             if self._current_source:
                 keep.add(self._current_source)
-            if 0 <= self._queue_idx + 1 < len(self._queue):
-                nxt_url = self._pushed.get(self._queue[self._queue_idx + 1])
+            nxt_i = self._queue_next_idx()
+            if nxt_i >= 0:
+                nxt_url = self._pushed.get(self._queue[nxt_i])
                 if nxt_url:
                     keep.add(nxt_url)
             stale = []
@@ -948,6 +950,7 @@ class FalconBeatDaemon:
                         self._playlist_active = False
                         self._queue = []
                         self._queue_idx = -1
+                        self._wrap_next = False
                         self._queue_fetch_fail.clear()
                         self.pause()
                         if self._np_doc and self._np_doc.get("playing"):
@@ -1127,11 +1130,12 @@ class FalconBeatDaemon:
         # the lookahead window, and skipped entries (cursor jumped past
         # them) get evicted along with played ones.
         keep_names = {media_name}
-        if 0 <= self._queue_idx + 1 < len(self._queue):
-            keep_names.add(self._queue[self._queue_idx + 1])
+        nxt_i = self._queue_next_idx()
+        if nxt_i >= 0:
+            keep_names.add(self._queue[nxt_i])
             # Cursor only just advanced — add "up next" to the now-playing
             # doc (it was pushed early, before the cursor moved).
-            doc["next"] = self._queue[self._queue_idx + 1]
+            doc["next"] = self._queue[nxt_i]
             self._set_nowplaying(doc)
         keep_urls = {
             u for n, u in self._pushed.items()
@@ -1221,6 +1225,18 @@ class FalconBeatDaemon:
 
     def _on_playlist(self, data):
         action = str(data.get("Action", "")).lower()
+        # Every playlist callback carries Playlist::GetInfo() — refresh the
+        # wrap flag so repeat toggles mid-show take effect. Matches core's
+        # own test (Playlist.cpp): another pass exists iff repeat is on and
+        # loopCount is 0 or hasn't been reached (m_loop counts finished
+        # wraps, so pass k has loop=k-1 → wraps while k < loopCount).
+        try:
+            repeat = int(data.get("repeat") or 0)
+            loop_cnt = int(data.get("loopCount") or 0)
+            loop = int(data.get("loop") or 0)
+        except (TypeError, ValueError):
+            repeat = loop_cnt = loop = 0
+        self._wrap_next = bool(repeat) and (loop_cnt == 0 or (loop + 1) < loop_cnt)
         if action == "start":
             LOG.info("playlist start")
             self._playlist_active = True
@@ -1277,6 +1293,7 @@ class FalconBeatDaemon:
             self._playlist_active = False
             self._queue = []
             self._queue_idx = -1
+            self._wrap_next = False
             self._queue_fetch_fail.clear()
             self.pause()
             if self._np_doc and self._np_doc.get("playing"):
@@ -1388,6 +1405,16 @@ class FalconBeatDaemon:
             except Exception as e:
                 LOG.warning("start push %s failed: %s", self._queue[i], e)
 
+    def _queue_next_idx(self):
+        """Queue position of the entry after the cursor. On a repeating
+        playlist the last entry's "next" wraps to index 0."""
+        if not self._queue:
+            return -1
+        i = self._queue_idx + 1
+        if i < len(self._queue):
+            return i
+        return 0 if self._wrap_next else -1
+
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
         registered — devices then download it while the current track plays,
@@ -1395,6 +1422,8 @@ class FalconBeatDaemon:
         if not self._playlist_active or self._shutdown.is_set():
             return
         nxt = idx + 1
+        if nxt >= len(self._queue):
+            nxt = 0 if self._wrap_next else -1
         if 0 <= nxt < len(self._queue):
             try:
                 self.ensure_source(self._queue[nxt])

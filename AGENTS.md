@@ -88,6 +88,10 @@ the Bearer on `/upload/complete` AND ingest writes.
   `query_next` fires when the current entry finishes (its `Item` is the
   finished index): it lazy-fetches the queue if start missed us, then
   pushes `queue[cursor+1]` — the true next entry.
+  Playlist repeat: GetInfo() carries `repeat`/`loop`/`loopCount`; when
+  another pass exists (`repeat && (loopCount==0 || loop+1<loopCount)`,
+  core's own test in Playlist.cpp) the last entry's "next" is `queue[0]` —
+  pushed, kept in the room, and advertised as nowplaying `next`.
   ensure_source stays the on-demand fallback for manual plays.
 - Now-playing metadata (server commit e0a318b): plugin PUTs
   `{ingest}/config/nowplaying` (Bearer) per media event —
