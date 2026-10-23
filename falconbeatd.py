@@ -67,11 +67,12 @@ DEFAULTS = {
     # admin WS, ingest writes, and the gated HTTP endpoints. Accepts
     # "host", "host:port", or "http(s)://host[:port]".
     "serverAddr": "localhost",
+    # Fixed room — the listener page joins 000000 (its ?room= override is
+    # for the server owner's own testing, not a plugin setting).
     "roomId": "000000",
     # Shared token: ?creator= on the admin WS, Bearer on /upload/complete,
     # and Bearer on ingest writes — the server's FALCONBEAT_TOKEN.
     "falconbeatToken": "",
-    "adminSecret": "",
     # Extra milliseconds added to the computed schedule delay when telling
     # devices where in the track to start. Tune if devices run audibly late.
     "nudgeMs": "0",
@@ -368,8 +369,6 @@ class FalconBeatSession:
         }
         if self.cfg.get("falconbeatToken"):
             params["creator"] = self.cfg["falconbeatToken"]
-        if self.cfg.get("adminSecret"):
-            params["admin"] = self.cfg["adminSecret"]
         url = "%s/ws?%s" % (ws_base, urllib.parse.urlencode(params))
         self.ws = MiniWS(url)
         self._closed.clear()

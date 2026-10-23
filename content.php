@@ -25,7 +25,7 @@ $pluginName = 'fpp-plugin-FalconBeat';
 // Credentials live under plugindata/ mode 0600, never in config/ — the
 // JSON backup carries config/plugin.* in clear (§14.11). The settings.json
 // rows stay declarative for masking/layout; their onChange posts here.
-$secretKeys = array('falconbeatToken', 'adminSecret');
+$secretKeys = array('falconbeatToken');
 
 function fb_secrets_path() {
     global $settings, $pluginName;
@@ -220,9 +220,8 @@ function fb_tests($v) {
     // 3. WS upgrade (room auto-creates; secret validity shows up as admin
     //    status, not the handshake — a 101 means the socket works)
     $q = http_build_query(array(
-        'roomId' => $v['roomId'], 'username' => 'fpp-config-test',
-        'clientId' => 'cfgtest', 'creator' => $token,
-        'admin' => $v['adminSecret']));
+        'roomId' => '000000', 'username' => 'fpp-config-test',
+        'clientId' => 'cfgtest', 'creator' => $token));
     list($ok, $detail) = fb_ws_probe($ws, $q);
     $results[] = array('FalconBeat WebSocket', $ok, $detail);
 
@@ -261,8 +260,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_test'])) {
     $v = array(
         'serverAddr'      => fb_get('serverAddr'),
         'falconbeatToken' => fb_get('falconbeatToken'),
-        'roomId'          => fb_get('roomId', '000000'),
-        'adminSecret'     => fb_get('adminSecret'),
     );
     $testResults = fb_tests($v);
 }

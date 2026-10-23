@@ -125,8 +125,8 @@ python -m py_compile falconbeatd.py callbacks.py
 ```
 
 FPP settings live in `config/plugin.fpp-plugin-FalconBeat` (key=value);
-settings.json fields save there via FPP's SetPluginSetting — EXCEPT the two
-credential fields (`falconbeatToken`, `adminSecret`): they keep the native
+settings.json fields save there via FPP's SetPluginSetting — EXCEPT the
+credential field (`falconbeatToken`): it keeps the native
 password row but override `onChange` to POST back to content.php, which
 writes `plugindata/.../secrets` (0600) — §14.11 keeps credentials out of
 config/ because the JSON backup carries plugin configs in clear. The daemon

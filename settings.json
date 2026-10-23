@@ -14,8 +14,6 @@
             "description": "Advanced",
             "level": 1,
             "settings": [
-                "roomId",
-                "adminSecret",
                 "gateMaxSec",
                 "preloadSettleMs"
             ]
@@ -80,31 +78,6 @@
             "step": 10,
             "default": "250",
             "suffix": "ms"
-        },
-        "roomId": {
-            "name": "roomId",
-            "description": "Room ID",
-            "tip": "6-digit room code. The listener page joins 000000 by default (?room= overrides it) — change both together.",
-            "restart": 0,
-            "reboot": 0,
-            "level": 1,
-            "type": "text",
-            "size": 8,
-            "maxlength": 6,
-            "default": "000000"
-        },
-        "adminSecret": {
-            "name": "adminSecret",
-            "description": "Admin Secret",
-            "tip": "Optional: demo-mode ?admin= secret. Not used by the normal token auth — usually left blank. Stored mode-0600 under plugindata — shows blank even when saved.",
-            "restart": 0,
-            "reboot": 0,
-            "level": 1,
-            "type": "password",
-            "onChange": "fbSaveSecret.bind(null, \"adminSecret\", this)",
-            "size": 40,
-            "maxlength": 128,
-            "default": ""
         },
         "gateMaxSec": {
             "name": "gateMaxSec",
