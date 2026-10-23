@@ -8,9 +8,14 @@
  * config/plugin.fpp-plugin-FalconBeat) and gates groups on uiLevel —
  * 0 Basic / 1 Advanced / 3 Developer. There is no form and no save loop.
  *
- * Exception: the two credential fields keep the native row but override
+ * Exception: the credential field keeps the native row but overrides
  * onChange to post here instead — §14.11 requires secrets in
  * plugindata/secrets (0600), never in config/ where backups carry them.
+ *
+ * Second exception: FPP's declarative types have no textarea, so the two
+ * multiline Show Info fields (description, links) render as custom rows
+ * below and post here too. Newlines store escaped as \n in the key=value
+ * file (WriteSettingToFile refuses real ones); the daemon unescapes.
  *
  * The FalconBeat edge is ONE published port: serverAddr carries the admin
  * WS, ingest writes, and the gated HTTP endpoints; one FALCONBEAT_TOKEN is
@@ -26,6 +31,10 @@ $pluginName = 'fpp-plugin-FalconBeat';
 // JSON backup carries config/plugin.* in clear (§14.11). The settings.json
 // rows stay declarative for masking/layout; their onChange posts here.
 $secretKeys = array('falconbeatToken');
+
+// Multiline show fields rendered as custom textarea rows (no declarative
+// textarea type) — saved into the same plugin.* file with \n escapes.
+$textKeys = array('showDescription', 'showLinks');
 
 function fb_secrets_path() {
     global $settings, $pluginName;
@@ -255,6 +264,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_secret'])) {
     exit;
 }
 
+// Textarea save endpoint — writes into config/plugin.<name> with newlines
+// escaped to \n (the key=value format is one setting per line).
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_setting'])) {
+    $key = $_POST['fb_setting'];
+    $val = isset($_POST['fb_setting_value']) ? $_POST['fb_setting_value'] : '';
+    $ok = in_array($key, $textKeys) && function_exists('WriteSettingToFile');
+    if ($ok) {
+        $val = str_replace('"', '', str_replace(array("\r\n", "\r", "\n"), '\n', $val));
+        $ok = WriteSettingToFile($key, $val, $pluginName);
+    }
+    if (!headers_sent()) header('Content-Type: application/json');
+    echo json_encode(array('ok' => (bool)$ok));
+    exit;
+}
+
+// Display helper for the textarea rows — reverses the stored \n escapes.
+function fb_multiline($key) {
+    return str_replace('\n', "\n", fb_get($key));
+}
+
 $testResults = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_test'])) {
     $v = array(
@@ -277,6 +306,32 @@ you change them — changes take effect on the next playlist/media event.
 <?php
 if (function_exists('LoadPluginSettings')) LoadPluginSettings($pluginName);
 PrintSettingGroup('FalconBeat', '', '', 1, $pluginName);
+PrintSettingGroup('FalconBeatShow', '', '', 1, $pluginName);
+?>
+<div class="row" style="margin-top:1rem;">
+    <div class="col-md-3 col-lg-2"><b>Description</b>
+        <div class="text-muted" style="font-size:0.85em;">A paragraph about the
+        show — donations, charity, how it works.</div>
+    </div>
+    <div class="col-md-9 col-lg-10">
+        <textarea id="showDescription" rows="3" class="form-control"
+                  onchange="fbSaveSetting('showDescription', this)"
+        ><?php echo htmlspecialchars(fb_multiline('showDescription')); ?></textarea>
+    </div>
+</div>
+<div class="row" style="margin-top:1rem;">
+    <div class="col-md-3 col-lg-2"><b>Links</b>
+        <div class="text-muted" style="font-size:0.85em;">One per line:
+        <code>Label = https://url</code> — shown as pills in Show Info.</div>
+    </div>
+    <div class="col-md-9 col-lg-10">
+        <textarea id="showLinks" rows="3" class="form-control"
+                  placeholder="Donate = https://example.com/donate"
+                  onchange="fbSaveSetting('showLinks', this)"
+        ><?php echo htmlspecialchars(fb_multiline('showLinks')); ?></textarea>
+    </div>
+</div>
+<?php
 PrintSettingGroup('FalconBeatAdvanced', '', '', 1, $pluginName);
 PrintSettingGroup('FalconBeatDeveloper', '', '', 1, $pluginName);
 ?>
@@ -295,6 +350,18 @@ function fbSaveSecret(key, el) {
         .then(function (d) {
             if (window.$ && $.jGrowl) $.jGrowl(d.ok ? key + ' saved' : 'Save failed — check plugindata permissions');
             if (d.ok) el.placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022 saved \u2014 type to replace';
+        });
+}
+// Same instant-save pattern for the custom textarea rows — posts back to
+// this page which writes the (newline-escaped) value into the plugin config.
+function fbSaveSetting(key, el) {
+    var fd = new FormData();
+    fd.append('fb_setting', key);
+    fd.append('fb_setting_value', el.value);
+    fetch(location.pathname + location.search, { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (window.$ && $.jGrowl) $.jGrowl(d.ok ? key + ' saved' : 'Save failed');
         });
 }
 <?php foreach ($secretKeys as $sk): if (fb_secret_get($sk) !== null): ?>
@@ -322,4 +389,54 @@ document.getElementById('<?php echo $sk; ?>').placeholder =
 <?php endforeach; ?>
 </table>
 <?php endif; ?>
+</fieldset>
+
+<fieldset>
+<legend>Signage QR</legend>
+<p class="text-muted">Encodes the Public Listener URL above — put it on your
+yard sign so visitors can scan-and-listen. Updates as you edit the field.</p>
+<canvas id="fbQrCanvas" width="216" height="216"
+        style="background:#fff;border-radius:8px;max-width:216px;"></canvas>
+<div id="fbQrLabel" class="text-muted" style="margin-top:0.4rem;"></div>
+<script>
+function fbRenderQr() {
+    var canvas = document.getElementById('fbQrCanvas');
+    var label = document.getElementById('fbQrLabel');
+    var input = document.getElementById('showPublicUrl');
+    var url = input && input.value.trim() !== ''
+        ? input.value.trim()
+        : <?php echo json_encode(fb_get('showPublicUrl')); ?>;
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (typeof qrcode === 'undefined') {
+        label.textContent = 'qrcode.js failed to load';
+        return;
+    }
+    if (!url) {
+        label.textContent = 'Set the Public Listener URL above to render a QR code.';
+        return;
+    }
+    try {
+        var qr = qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        var count = qr.getModuleCount();
+        var tile = Math.floor(canvas.width / (count + 8));
+        var off = Math.floor((canvas.width - tile * count) / 2);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#000';
+        for (var r = 0; r < count; r++)
+            for (var c = 0; c < count; c++)
+                if (qr.isDark(r, c))
+                    ctx.fillRect(off + c * tile, off + r * tile, tile, tile);
+        label.textContent = url;
+    } catch (e) {
+        label.textContent = 'Could not encode URL: ' + e;
+    }
+}
+fbRenderQr();
+var fbQrInput = document.getElementById('showPublicUrl');
+if (fbQrInput) fbQrInput.addEventListener('input', fbRenderQr);
+</script>
 </fieldset>

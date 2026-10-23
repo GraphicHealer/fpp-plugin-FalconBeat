@@ -27,6 +27,13 @@ Input/Output Setup &rarr; FalconBeat: the server's LAN address (one published
 port carries everything) and the shared server token. Status &rarr;
 FalconBeat Status shows the live connection state.
 
+**Show Info** (same page): name, tagline, hosted-by, schedule, location,
+description, links (`Label = URL`, one per line), and your public listener
+URL — the daemon pushes them to the server's `show.json` on every change and
+the listener page renders them in its Show Info sheet. Name/tagline default
+to FPP's HostName/HostDescription. The **Signage QR** at the bottom of the
+page encodes the public listener URL for your yard sign.
+
 ## Notes
 
 - Secrets are stored in `plugindata/fpp-plugin-FalconBeat/secrets` mode

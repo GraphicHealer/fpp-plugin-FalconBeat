@@ -53,6 +53,7 @@ STATE_PATH = os.path.join(DATADIR, "status.json")
 SECRETS_PATH = os.path.join(DATADIR, "secrets")
 SETTINGS_PATH = os.path.join(CFGDIR, "plugin." + PLUGIN_NAME)
 FPP_STATUS_URL = "http://127.0.0.1/api/fppd/status"
+FPP_SYSINFO_URL = "http://127.0.0.1/api/system/info"
 
 LOG = logging.getLogger("falconbeatd")
 
@@ -660,6 +661,15 @@ def fpp_status():
         return None
 
 
+def fpp_system_info():
+    """FPP system info ({HostName, HostDescription, ...}), or None."""
+    try:
+        with urllib.request.urlopen(FPP_SYSINFO_URL, timeout=3) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
 def fpp_position_seconds():
     """Current media position from the FPP status API. Returns (seconds, playing)."""
     st = fpp_status() or {}
@@ -755,6 +765,8 @@ class FalconBeatDaemon:
         self._push_errors = {}  # media_name -> last push failure (for waiters)
         self._state_lock = threading.Lock()
         self._np_doc = None  # last nowplaying doc pushed to ingest
+        self._show_pushed = None  # last show config doc pushed (dedupe)
+        self._sysinfo = None    # cached FPP system info (None = retry)
         self._failed_media = {}  # filename -> epoch of last failed lookup
         self._pb_lock = threading.Lock()  # serialize play()/pause()
 
@@ -885,6 +897,67 @@ class FalconBeatDaemon:
             except Exception as e:
                 LOG.warning("nowplaying heartbeat failed: %s", e)
 
+    # -- show info (ingest /config/show) ---------------------------------
+    # FPP is the single source of truth: the daemon renders the show doc
+    # from plugin settings (falling back to FPP HostName/HostDescription)
+    # and pushes it whenever the rendered doc changes — settings saves land
+    # on the listener page within one reconcile tick.
+
+    def _fpp_sysinfo(self):
+        if self._sysinfo is None:
+            self._sysinfo = fpp_system_info()  # stays None on failure -> retry
+        return self._sysinfo or {}
+
+    def _show_doc(self):
+        cfg = self.cfg
+        sysinfo = self._fpp_sysinfo()
+        doc = {
+            "showName": (cfg.get("showName") or "").strip()
+            or (sysinfo.get("HostName") or "").strip()
+            or "FalconBeat",
+            "links": [],
+        }
+        tagline = (cfg.get("showTagline") or "").strip() or (
+            sysinfo.get("HostDescription") or ""
+        ).strip()
+        if tagline:
+            doc["tagline"] = tagline
+        for field, key in (
+            ("hostedBy", "showHostedBy"),
+            ("description", "showDescription"),
+            ("schedule", "showSchedule"),
+            ("location", "showLocation"),
+            ("publicUrl", "showPublicUrl"),
+        ):
+            # The textarea rows (description, links) save with newlines
+            # escaped as literal \n — plugin.* is one setting per line.
+            v = (cfg.get(key) or "").replace("\\n", "\n").strip()
+            if v:
+                doc[field] = v
+        # Links are typed "Label = URL", one per line. Split on the first
+        # '=' so URLs may carry query strings; blanks/bad lines are dropped.
+        for line in (
+            cfg.get("showLinks") or ""
+        ).replace("\\n", "\n").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            label, sep, url = line.partition("=")
+            if sep and url.strip():
+                doc["links"].append({"label": label.strip(), "url": url.strip()})
+        return doc
+
+    def _push_show(self):
+        doc = self._show_doc()
+        if doc == self._show_pushed:
+            return
+        try:
+            self._put_config("show", doc)
+            self._show_pushed = doc
+            LOG.info("show config pushed")
+        except Exception as e:
+            LOG.warning("show config push failed: %s", e)
+
     # -- fppd status reconciler ------------------------------------------
     # The callbacks only fire on NEW transitions: a playlist already playing
     # when the daemon comes up (fppd restarted, schedule resumed mid-show,
@@ -901,6 +974,7 @@ class FalconBeatDaemon:
                 self.cfg = load_settings()
                 if not cfg_bool(self.cfg.get("enabled", "1")):
                     continue
+                self._push_show()
                 st = fpp_status()
                 if not st:
                     continue

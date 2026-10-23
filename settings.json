@@ -10,6 +10,18 @@
                 "syncOffsetMs"
             ]
         },
+        "FalconBeatShow": {
+            "description": "Show Info (listener page)",
+            "level": 0,
+            "settings": [
+                "showName",
+                "showTagline",
+                "showHostedBy",
+                "showSchedule",
+                "showLocation",
+                "showPublicUrl"
+            ]
+        },
         "FalconBeatAdvanced": {
             "description": "Advanced",
             "level": 1,
@@ -63,6 +75,78 @@
             "onChange": "fbSaveSecret.bind(null, \"falconbeatToken\", this)",
             "size": 40,
             "maxlength": 128,
+            "default": ""
+        },
+        "showName": {
+            "name": "showName",
+            "description": "Show Name",
+            "tip": "Big title on the listener page. Blank = your FPP HostName.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 128,
+            "default": ""
+        },
+        "showTagline": {
+            "name": "showTagline",
+            "description": "Tagline",
+            "tip": "Small line under the show name. Blank = your FPP HostDescription.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 200,
+            "default": ""
+        },
+        "showHostedBy": {
+            "name": "showHostedBy",
+            "description": "Hosted By",
+            "tip": "e.g. \"The Smith Family\" — shown in Show Info.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 128,
+            "default": ""
+        },
+        "showSchedule": {
+            "name": "showSchedule",
+            "description": "Schedule",
+            "tip": "e.g. \"Nightly 6-11pm, Nov 28 - Jan 1\".",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 200,
+            "default": ""
+        },
+        "showLocation": {
+            "name": "showLocation",
+            "description": "Location",
+            "tip": "Address or short description of where the show is.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 200,
+            "default": ""
+        },
+        "showPublicUrl": {
+            "name": "showPublicUrl",
+            "description": "Public Listener URL",
+            "tip": "The https URL visitors load (your tunnel/proxy) — used for the signage QR below.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 200,
             "default": ""
         },
         "syncOffsetMs": {

@@ -10,6 +10,9 @@ pip installs are system-wide across plugins).
 
 - `callbacks.py` — fppd entry point, keep it FAST (fppd waitpid()s on it)
 - `falconbeatd.py` — the daemon: MiniWS client + FalconBeat session + control socket
+- `js/qrcode.js` — vendored qrcode-generator (MIT © Kazuhiko Arase) for the
+  signage QR on the config page; FPP auto-includes plugin `js/` files on
+  every plugin page, exposing the global `qrcode`
 - `settings.json` — declarative field/group schema FPP renders natively
   (PrintSettingGroup, per-field AJAX save, uiLevel-gated groups:
   0 Basic / 1 Advanced / 3 Developer)
@@ -93,6 +96,13 @@ the Bearer on `/upload/complete` AND ingest writes.
   core's own test in Playlist.cpp) the last entry's "next" is `queue[0]` —
   pushed, kept in the room, and advertised as nowplaying `next`.
   ensure_source stays the on-demand fallback for manual plays.
+- Show metadata: plugin PUTs `{ingest}/config/show` (Bearer) whenever the
+  rendered doc changes — FPP settings are the single source of truth (no
+  web settings page on the server). `_show_doc()` builds it from the
+  show* settings; links parse as `Label = URL` lines; showName/tagline
+  default to FPP `/api/system/info` HostName/HostDescription. Re-checked
+  every reconcile tick (~3s), so settings saves propagate automatically;
+  skipped entirely while `enabled` is off.
 - Now-playing metadata (server commit e0a318b): plugin PUTs
   `{ingest}/config/nowplaying` (Bearer) per media event —
   `{playing, title?, artist?, album?, filename, updatedAtMs}` — and
