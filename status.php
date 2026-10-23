@@ -92,5 +92,5 @@ if ($listener !== ''): ?>
 
 <p class="text-muted">
 Log: <code>logs/plugin-<?php echo fb_h($pluginName); ?>.log</code>
-(Config under Content Setup &rarr; FalconBeat)
+(Config under Input/Output Setup &rarr; FalconBeat)
 </p>

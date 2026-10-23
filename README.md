@@ -23,7 +23,7 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 
 ## Configure
 
-Content Setup &rarr; FalconBeat: the server's LAN address (one published
+Input/Output Setup &rarr; FalconBeat: the server's LAN address (one published
 port carries everything) and the shared server token. Status &rarr;
 FalconBeat Status shows the live connection state.
 

@@ -1,6 +1,6 @@
 <?php
 /*
- * FalconBeat configuration page (Content Setup menu).
+ * FalconBeat configuration page (Input/Output Setup menu).
  *
  * Fields are declared in settings.json and rendered/saved by FPP's own
  * machinery: PrintSettingGroup draws the native rows (tip icons, uiLevel

@@ -10,7 +10,7 @@ $menuEntries = Array(
 	),
 	Array(
 		'text' => 'FalconBeat',
-		'type' => 'content',
+		'type' => 'output',
 		'page' => 'content.php',
 		'wrap' => 1
 	),

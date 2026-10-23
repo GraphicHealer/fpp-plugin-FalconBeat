@@ -23,7 +23,7 @@ a few seconds after the playlist ends.</li>
 
 <h4>Configuration</h4>
 <p>
-Content Setup &rarr; FalconBeat. You need the server's LAN address (one
+Input/Output Setup &rarr; FalconBeat. You need the server's LAN address (one
 published port carries the admin socket, uploads and ingest) and the
 shared server token. Devices resolve audio URLs against the listener
 page's own origin, so no public address is configured here.
