@@ -32,8 +32,7 @@ function fb_h($s) { return htmlspecialchars((string)$s); }
                              : '<span class="text-danger">not running</span>'; ?></td></tr>
 <?php if ($state): ?>
 <tr><td><b>Enabled</b></td><td><?php echo $state['enabled'] ? 'yes' : 'no'; ?></td></tr>
-<tr><td><b>FalconBeat</b></td><td><?php echo fb_h($state['serverAddr']); ?>
-    room <?php echo fb_h($state['roomId']); ?> —
+<tr><td><b>FalconBeat</b></td><td><?php echo fb_h($state['serverAddr']); ?> —
     <?php echo $state['connected'] ? '<span class="text-success">connected</span>'
                                    : '<span class="text-muted">disconnected</span>'; ?></td></tr>
 <tr><td><b>Playlist active</b></td><td><?php echo $state['playlistActive'] ? 'yes' : 'no'; ?></td></tr>

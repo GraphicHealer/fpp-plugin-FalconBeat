@@ -15,7 +15,7 @@
         "sends": [
             {
                 "to": "the FalconBeat server you configure",
-                "what": "show audio files, playback commands, server token",
+                "what": "show audio files, playback commands, server token, now-playing metadata, and the show info you configure (name, tagline, host, schedule, location, description, links, public listener URL)",
                 "why": "to let visitors' devices play the show audio in sync with the lights",
                 "alwaysOn": false
             }
