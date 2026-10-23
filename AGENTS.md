@@ -39,8 +39,7 @@ beatsync WS, `/health`, Bearer-gated `/upload/complete` + `/discover`,
 ingest `PUT/DELETE /media/*` + `PUT /config/*` (token-checked by ingest
 itself), public `GET /media/*`, and the listener SPA. `serverAddr` in
 settings is the LAN edge (`host[:port]` or full URL — `_split_addr`
-derives `wsBase`/`httpBase`); `publicBase` is the devices' public origin
-(`mediaBase` = `<base>/media`). ONE shared secret, `falconbeatToken`
+derives `wsBase`/`httpBase`). ONE shared secret, `falconbeatToken`
 (= the server's FALCONBEAT_TOKEN), is `?creator=` on the admin WS AND
 the Bearer on `/upload/complete` AND ingest writes.
 
@@ -64,8 +63,10 @@ the Bearer on `/upload/complete` AND ingest writes.
   holds FPP meanwhile (counts against gateMaxSec).
 - Push flow (no S3): `PUT <edge>/media/<name>` (Bearer TOKEN) →
   `POST <edge>/upload/complete {roomId, originalName, publicUrl}` with
-  the same Bearer TOKEN (Caddy gates it — 403 without) — devices then
-  fetch `<publicBase>/media/<name>` from the edge's file_server.
+  the same Bearer TOKEN (Caddy gates it — 403 without). The registered
+  `publicUrl` is path-only (`/media/<name>`): the listener resolves it
+  against the page origin, so devices always fetch through the ingress
+  they arrived on and no public-base setting exists.
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
   payload sections if present, else `GET /api/playlist/<name>` using the

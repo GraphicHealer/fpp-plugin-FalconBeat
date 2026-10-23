@@ -73,13 +73,21 @@ $cfgFile = (isset($settings['configDirectory']) ? $settings['configDirectory'] :
 $listener = '';
 if (is_readable($cfgFile)) {
     foreach (file($cfgFile) as $line) {
-        if (strpos(trim($line), 'publicBase') === 0) {
-            $listener = trim(trim(explode('=', $line, 2)[1]), '"');
+        if (strpos(trim($line), 'serverAddr') === 0) {
+            $addr = trim(trim(explode('=', $line, 2)[1]), '"');
+            if ($addr !== '') {
+                // Same-origin listener page — the edge serves the SPA on
+                // the one published port; normalize to http(s)://host[:port].
+                $secure = (strpos($addr, 'https://') === 0 || strpos($addr, 'wss://') === 0);
+                $listener = ($secure ? 'https' : 'http') . '://'
+                    . preg_replace('#^\\w+://#', '', rtrim($addr, '/'));
+            }
         }
     }
 }
 if ($listener !== ''): ?>
-<p><b>Listener page:</b> <a href="<?php echo fb_h($listener); ?>" target="_blank"><?php echo fb_h($listener); ?></a></p>
+<p><b>Listener page:</b> <a href="<?php echo fb_h($listener); ?>" target="_blank"><?php echo fb_h($listener); ?></a>
+    <small class="text-muted">on your LAN — visitors open whatever public address you share</small></p>
 <?php endif; ?>
 
 <p class="text-muted">

@@ -50,8 +50,8 @@ $sections = array(
         // key, label, type, help text
         array('enabled',         'Enabled',          'checkbox', 'Master switch — when off, playback events are ignored.'),
         array('serverAddr',      'Server (LAN)',     'text',     'FalconBeat server on your LAN: falconbeat.local or falconbeat.local:9080 (one published port carries everything).'),
-        array('publicBase',      'Public URL',       'text',     'e.g. https://falconbeat.example.com — where devices open the listener page and fetch /media.'),
         array('falconbeatToken', 'Server Token',     'password', 'FALCONBEAT_TOKEN on the server — one shared secret for admin WS, uploads and ingest writes.'),
+        array('syncOffsetMs',    'Sync Offset (ms)', 'text',     'Tune by ear — raises/lowers when FPP is released relative to devices. Raise it if the audio runs ahead of the lights, lower it if the audio trails.'),
     )),
     array('level' => 1, 'title' => 'Advanced', 'fields' => array(
         array('roomId',          'Room ID',          'text',     '6-digit room code. The listener page joins 000000 by default (?room= overrides it) — change both together.'),
@@ -61,7 +61,6 @@ $sections = array(
     )),
     array('level' => 3, 'title' => 'Developer', 'fields' => array(
         array('nudgeMs',         'Extra Delay (ms)', 'text',     'Added to the computed schedule delay for the device track offset. 0 = auto.'),
-        array('startLagMs',      'FPP Start Lag (ms)', 'text',   'How long FPP takes to actually start media after the gate releases — subtracted from the device offset. Tune by ear.'),
         array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
     )),
 );
@@ -79,7 +78,7 @@ $defaults = array(
     'enabled' => '1',
     'roomId' => '000000',
     'gateMaxSec' => '10',
-    'startLagMs' => '250',
+    'syncOffsetMs' => '250',
     'preloadSettleMs' => '2500',
 );
 
@@ -169,8 +168,8 @@ function fb_ws_probe($wsUrl, $query, $timeout = 4) {
 }
 
 /**
- * Derive wire URLs from the simple fields — same rules as falconbeatd's
- * _split_addr/load_settings. Returns [httpBase, wsBase, mediaBase].
+ * Derive wire URLs from serverAddr — same rules as falconbeatd's
+ * _split_addr/load_settings. Returns [httpBase, wsBase].
  */
 function fb_bases($v) {
     $addr = rtrim(trim($v['serverAddr']), '/');
@@ -182,18 +181,16 @@ function fb_bases($v) {
         $addr = (isset($u['host']) ? $u['host'] : '')
               . (isset($u['port']) ? ':' . $u['port'] : '');
     }
-    $pub = rtrim(trim($v['publicBase']), '/');
     return array(
         ($secure ? 'https' : 'http') . '://' . $addr,
         ($secure ? 'wss' : 'ws') . '://' . $addr,
-        $pub === '' ? '' : $pub . '/media',
     );
 }
 
 function fb_tests($v) {
     // $v: array of saved setting values
     $results = array();
-    list($http, $ws, $media) = fb_bases($v);
+    list($http, $ws) = fb_bases($v);
     $token = $v['falconbeatToken'];
     $bearer = array('Authorization: Bearer ' . $token);
 
@@ -234,14 +231,12 @@ function fb_tests($v) {
               : ($code ? "HTTP $code" : $err));
     }
 
-    // 5. public media URL — any HTTP answer (even 404 before the first
-    //    track) proves the public route works; a transport error doesn't.
-    if ($media !== '') {
-        list($code, $err) = fb_http('GET', $media . '/nowplaying.json');
-        $results[] = array('Public media URL', $code > 0,
-            $code ? "HTTP $code" . ($code === 404 ? ' (no track pushed yet — fine)' : '')
-                  : $err);
-    }
+    // 5. media route — devices fetch /media/* from this same edge; any
+    //    HTTP answer (even 404 before the first track) proves it's wired.
+    list($code, $err) = fb_http('GET', $http . '/media/nowplaying.json');
+    $results[] = array('Media route', $code > 0,
+        $code ? "HTTP $code" . ($code === 404 ? ' (no track pushed yet — fine)' : '')
+              : $err);
 
     return $results;
 }

@@ -72,8 +72,6 @@ DEFAULTS = {
     # and Bearer on ingest writes — the server's FALCONBEAT_TOKEN.
     "falconbeatToken": "",
     "adminSecret": "",
-    # Public base URL devices fetch from — https://host; /media is derived.
-    "publicBase": "",
     # Extra milliseconds added to the computed schedule delay when telling
     # devices where in the track to start. Tune if devices run audibly late.
     "nudgeMs": "0",
@@ -85,9 +83,10 @@ DEFAULTS = {
     # for push + register + PLAY echo, so tracks can't start before devices
     # are ready. 0 disables gating.
     "gateMaxSec": "10",
-    # Milliseconds between the gate releasing and FPP's media output actually
-    # starting — subtracted from the device track offset on gated starts.
-    "startLagMs": "250",
+    # Sync offset: milliseconds between the gate releasing and FPP's media
+    # output actually starting — the user-facing timing knob (settings page
+    # label "Sync Offset").
+    "syncOffsetMs": "250",
     # Devices fetch audio over the public internet; when a track was just
     # registered, the server only holds its 3s load-coordination window once
     # PLAY is sent — a multi-MB download may not fit. On gated starts where
@@ -126,8 +125,6 @@ def load_settings():
     secure, hostport = _split_addr(settings.get("serverAddr", ""))
     settings["httpBase"] = ("https" if secure else "http") + "://" + hostport
     settings["wsBase"] = ("wss" if secure else "ws") + "://" + hostport
-    pub = settings.get("publicBase", "").strip().rstrip("/")
-    settings["mediaBase"] = pub + "/media" if pub else ""
     return settings
 
 
@@ -634,8 +631,10 @@ class FalconBeatSession:
             stored = json.loads(resp).get("stored", media_name)
         except ValueError:
             pass
-        base = self.cfg["mediaBase"] or "%s/media" % ingest
-        return "%s/%s" % (base, urllib.parse.quote(stored))
+        # Path-only URL: the listener resolves "/media/..." against the
+        # page origin, so devices always fetch through the same ingress
+        # they arrived on — no public-base setting needed.
+        return "/media/%s" % urllib.parse.quote(stored)
 
 
 # --------------------------------------------------------------------------
@@ -1066,7 +1065,7 @@ class FalconBeatDaemon:
             # at (almost) the same instant devices start at position 0 — the
             # server's scheduling delay becomes a between-track pause instead
             # of missing intro audio.
-            lag = float(self.cfg.get("startLagMs") or 0) / 1000.0
+            lag = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
             target = 0.0
             LOG.info("PLAY %s @ 0s (gated; holding ~%.2fs)",
                      media_name, delay)
