@@ -23,9 +23,10 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 
 ## Configure
 
-Content Setup &rarr; FalconBeat: server WS URL, room ID, creator secret,
-ingest URL + token, and the public media URL devices fetch audio from.
-Status &rarr; FalconBeat Status shows the live connection state.
+Content Setup &rarr; FalconBeat: the server's LAN address (one published
+port carries everything), the public URL devices open, the room ID, and the
+shared server token. Status &rarr; FalconBeat Status shows the live
+connection state.
 
 ## Notes
 

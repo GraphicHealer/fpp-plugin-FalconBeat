@@ -5,14 +5,21 @@
  * Settings are stored the FPP way: config/plugin.fpp-plugin-FalconBeat
  * via WriteSettingToFile, read back with ReadSettingFromFile.
  *
- * Saving (or the Test button) probes: ingest /health + bearer token,
- * FalconBeat /health + WS upgrade, and the public media URL.
+ * The FalconBeat edge is ONE published port: serverAddr carries the admin
+ * WS, ingest writes, and the gated HTTP endpoints; one FALCONBEAT_TOKEN is
+ * ?creator= on the WS and Bearer on /upload/complete + ingest writes.
+ * Advanced/Developer sections follow FPP's uiLevel (0 Basic / 1 Advanced /
+ * 3 Developer) — hidden fields keep their stored values on save.
+ *
+ * Saving (or the Test button) probes: edge /health, the shared Bearer
+ * token, the WS upgrade, the upload/complete gate, and the public media
+ * URL.
  */
 
 $pluginName = 'fpp-plugin-FalconBeat';
 
 // Credentials live under plugindata/ mode 0600, never in config/ (§14.11).
-$secretKeys = array('creatorSecret', 'adminSecret', 'ingestToken');
+$secretKeys = array('falconbeatToken', 'adminSecret');
 
 function fb_secrets_path() {
     global $settings, $pluginName;
@@ -33,23 +40,40 @@ function fb_secret_get($key) {
     return null;
 }
 
-$fields = array(
-    // key, label, type, help text
-    array('enabled',        'Enabled',            'checkbox', 'Master switch — when off, playback events are ignored.'),
-    array('beatsyncUrl',    'FalconBeat WS URL',  'text',     'e.g. ws://falconbeat.local:8080 — LAN address of the FalconBeat server (devices do not use this).'),
-    array('roomId',         'Room ID',            'text',     '6-digit room code, e.g. 000000.'),
-    array('creatorSecret',  'Creator Secret',     'password', 'CREATOR_SECRET on the FalconBeat server (?creator= admin auth). LAN-only.'),
-    array('adminSecret',    'Admin Secret',       'password', 'Optional: demo-mode ?admin= secret. Usually left blank.'),
-    array('ingestUrl',      'Ingest URL',         'text',     'e.g. http://falconbeat.local:8090 — LAN media ingest service.'),
-    array('ingestToken',    'Ingest Token',       'password', 'Bearer token for ingest PUTs. LAN-only.'),
-    array('mediaPublicUrl', 'Public Media URL',   'text',     'e.g. https://falconbeat.example.com/media — where devices fetch audio. Must end with /media.'),
-    array('listenerUrl',    'Listener Page URL',  'text',     'Optional: public URL of the listener web app, shown on the status page.'),
-    array('nudgeMs',        'Extra Delay (ms)',   'text',     'Added to the computed schedule delay for the device track offset. 0 = auto.'),
-    array('gateMaxSec',     'Sync Gate (sec)',    'text',     'Hold each track\'s start until devices confirm loaded (max seconds). 0 = off.'),
-    array('startLagMs',     'FPP Start Lag (ms)', 'text',     'How long FPP takes to actually start media after the gate releases — subtracted from the device offset. Tune by ear.'),
-    array('preloadSettleMs','Preload Settle (ms)', 'text',    'When a track is pushed at play time, wait this long before PLAY so devices can download over WAN. Counts against the sync gate. 0 = off.'),
-    array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
+// Sections honor FPP's uiLevel: 0 Basic, 1 Advanced, 3 Developer.
+// Hidden sections keep their stored values — the save loop skips keys
+// that were not rendered.
+$uiLevel = isset($settings['uiLevel']) ? intval($settings['uiLevel']) : 0;
+
+$sections = array(
+    array('level' => 0, 'title' => '', 'fields' => array(
+        // key, label, type, help text
+        array('enabled',         'Enabled',          'checkbox', 'Master switch — when off, playback events are ignored.'),
+        array('serverAddr',      'Server (LAN)',     'text',     'FalconBeat server on your LAN: falconbeat.local or falconbeat.local:9080 (one published port carries everything).'),
+        array('publicBase',      'Public URL',       'text',     'e.g. https://falconbeat.example.com — where devices open the listener page and fetch /media.'),
+        array('roomId',          'Room ID',          'text',     '6-digit room code, e.g. 000000.'),
+        array('falconbeatToken', 'Server Token',     'password', 'FALCONBEAT_TOKEN on the server — one shared secret for admin WS, uploads and ingest writes.'),
+    )),
+    array('level' => 1, 'title' => 'Advanced', 'fields' => array(
+        array('adminSecret',     'Admin Secret',     'password', 'Optional: demo-mode ?admin= secret. Usually left blank.'),
+        array('gateMaxSec',      'Sync Gate (sec)',  'text',     'Hold each track\'s start until devices confirm loaded (max seconds). 0 = off.'),
+        array('preloadSettleMs', 'Preload Settle (ms)', 'text',  'When a track is pushed at play time, wait this long before PLAY so devices can download over WAN. Counts against the sync gate. 0 = off.'),
+    )),
+    array('level' => 3, 'title' => 'Developer', 'fields' => array(
+        array('nudgeMs',         'Extra Delay (ms)', 'text',     'Added to the computed schedule delay for the device track offset. 0 = auto.'),
+        array('startLagMs',      'FPP Start Lag (ms)', 'text',   'How long FPP takes to actually start media after the gate releases — subtracted from the device offset. Tune by ear.'),
+        array('disconnectGraceSec', 'Disconnect grace (s)', 'text', 'Seconds the admin socket is held after playlist stop.'),
+    )),
 );
+
+$fields = array();
+$rendered = array();
+foreach ($sections as $sec) {
+    foreach ($sec['fields'] as $f) {
+        $fields[] = $f;
+        if ($sec['level'] <= $uiLevel) $rendered[$f[0]] = true;
+    }
+}
 
 $defaults = array(
     'enabled' => '1',
@@ -144,52 +168,76 @@ function fb_ws_probe($wsUrl, $query, $timeout = 4) {
     return array(strpos($line, ' 101') !== false, trim($line));
 }
 
+/**
+ * Derive wire URLs from the simple fields — same rules as falconbeatd's
+ * _split_addr/load_settings. Returns [httpBase, wsBase, mediaBase].
+ */
+function fb_bases($v) {
+    $addr = rtrim(trim($v['serverAddr']), '/');
+    $secure = false;
+    if (strpos($addr, '://') !== false) {
+        $u = parse_url($addr);
+        $secure = in_array(isset($u['scheme']) ? $u['scheme'] : '',
+                           array('https', 'wss'));
+        $addr = (isset($u['host']) ? $u['host'] : '')
+              . (isset($u['port']) ? ':' . $u['port'] : '');
+    }
+    $pub = rtrim(trim($v['publicBase']), '/');
+    return array(
+        ($secure ? 'https' : 'http') . '://' . $addr,
+        ($secure ? 'wss' : 'ws') . '://' . $addr,
+        $pub === '' ? '' : $pub . '/media',
+    );
+}
+
 function fb_tests($v) {
     // $v: array of saved setting values
     $results = array();
+    list($http, $ws, $media) = fb_bases($v);
+    $token = $v['falconbeatToken'];
+    $bearer = array('Authorization: Bearer ' . $token);
 
-    // 1. ingest reachability
-    $ingest = rtrim($v['ingestUrl'], '/');
-    list($code, $err) = fb_http('GET', $ingest . '/health');
-    $results[] = array('Ingest reachable', $code === 200,
-        $code ? "HTTP $code" : $err);
-
-    // 2. ingest token — PUT with deliberately invalid JSON: auth is checked
-    //    before the body is parsed, so 400 = token accepted, 401 = rejected.
-    //    Nothing is written either way.
-    if ($v['ingestToken'] === '') {
-        $results[] = array('Ingest token', false,
-            'empty — nothing saved yet; type it above and Save & Test');
-    } else {
-        $auth = array('Authorization: Bearer ' . $v['ingestToken'],
-                      'Content-Type: application/json');
-        list($code, $err) = fb_http('PUT', $ingest . '/config/show', $auth, 'x');
-        $ok = ($code === 400); // invalid-JSON past the auth gate
-        $results[] = array('Ingest token', $ok,
-            $code === 401 ? 'unauthorized — check INGEST_TOKEN'
-              : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
-    }
-
-    // 3. falconbeat HTTP /health
-    $httpBase = preg_replace('/^ws/', 'http', rtrim($v['beatsyncUrl'], '/'));
-    list($code, $err) = fb_http('GET', $httpBase . '/health');
+    // 1. edge reachability — /health proxies to beatsync through Caddy
+    list($code, $err) = fb_http('GET', $http . '/health');
     $results[] = array('FalconBeat reachable', $code === 200,
         $code ? "HTTP $code" : $err);
 
-    // 4. falconbeat WS upgrade (room auto-creates; secret validity shows up as
-    //    admin status, not the handshake — a 101 means the socket works)
+    // 2. shared token — PUT with deliberately invalid JSON: ingest checks
+    //    auth before the body, so 400 = accepted, 401 = rejected.
+    if ($token === '') {
+        $results[] = array('Server token', false,
+            'empty — nothing saved yet; type it above and Save & Test');
+    } else {
+        $auth = array_merge($bearer, array('Content-Type: application/json'));
+        list($code, $err) = fb_http('PUT', $http . '/config/show', $auth, 'x');
+        $ok = ($code === 400); // invalid-JSON past the auth gate
+        $results[] = array('Server token', $ok,
+            $code === 401 ? 'unauthorized — check FALCONBEAT_TOKEN'
+              : ($code === 400 ? 'accepted' : ($code ? "HTTP $code" : $err)));
+    }
+
+    // 3. WS upgrade (room auto-creates; secret validity shows up as admin
+    //    status, not the handshake — a 101 means the socket works)
     $q = http_build_query(array(
         'roomId' => $v['roomId'], 'username' => 'fpp-config-test',
-        'clientId' => 'cfgtest', 'creator' => $v['creatorSecret'],
+        'clientId' => 'cfgtest', 'creator' => $token,
         'admin' => $v['adminSecret']));
-    list($ok, $detail) = fb_ws_probe($v['beatsyncUrl'], $q);
+    list($ok, $detail) = fb_ws_probe($ws, $q);
     $results[] = array('FalconBeat WebSocket', $ok, $detail);
 
-    // 5. public media URL — any HTTP answer (even 404 before the first track)
-    //    proves the public route works; a transport error means it doesn't.
-    if ($v['mediaPublicUrl'] !== '') {
-        list($code, $err) = fb_http('GET',
-            rtrim($v['mediaPublicUrl'], '/') . '/nowplaying.json');
+    // 4. upload/complete gate — Caddy checks the Bearer before proxying:
+    //    403 = token rejected, anything else = past the gate.
+    if ($token !== '') {
+        list($code, $err) = fb_http('GET', $http . '/upload/complete', $bearer);
+        $results[] = array('Upload gate', $code !== 403,
+            $code === 403 ? 'forbidden — check FALCONBEAT_TOKEN'
+              : ($code ? "HTTP $code" : $err));
+    }
+
+    // 5. public media URL — any HTTP answer (even 404 before the first
+    //    track) proves the public route works; a transport error doesn't.
+    if ($media !== '') {
+        list($code, $err) = fb_http('GET', $media . '/nowplaying.json');
         $results[] = array('Public media URL', $code > 0,
             $code ? "HTTP $code" . ($code === 404 ? ' (no track pushed yet — fine)' : '')
                   : $err);
@@ -207,6 +255,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $secrets = array();
         foreach ($fields as $f) {
             $key = $f[0];
+            // Not rendered at this uiLevel — leave the stored value alone.
+            if (!isset($rendered[$key])) continue;
             if ($f[2] === 'checkbox') {
                 $value = isset($_POST[$key]) ? '1' : '0';
             } else {
@@ -255,6 +305,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $formVals = array();
         foreach ($fields as $f) {
             $key = $f[0];
+            if (!isset($rendered[$key])) {
+                // Hidden at this uiLevel — test the stored value.
+                $formVals[$key] = fb_get($key);
+                continue;
+            }
             $formVals[$key] = ($f[2] === 'checkbox')
                 ? (isset($_POST[$key]) ? '1' : '0')
                 : (isset($_POST[$key]) ? trim($_POST[$key]) : '');
@@ -302,11 +357,16 @@ run.
 
 <form method="post" action="">
 <table class="table table-striped">
-<?php foreach ($fields as $f):
-    $key = $f[0]; $label = $f[1]; $type = $f[2]; $help = $f[3];
-    $val = ($formVals !== null && array_key_exists($key, $formVals))
-        ? $formVals[$key]
-        : fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
+<?php foreach ($sections as $sec):
+    if ($sec['level'] > $uiLevel) continue;
+    if ($sec['title'] !== ''): ?>
+<tr><td colspan="2"><h4><?php echo htmlspecialchars($sec['title']); ?></h4></td></tr>
+<?php endif;
+    foreach ($sec['fields'] as $f):
+        $key = $f[0]; $label = $f[1]; $type = $f[2]; $help = $f[3];
+        $val = ($formVals !== null && array_key_exists($key, $formVals))
+            ? $formVals[$key]
+            : fb_get($key, isset($defaults[$key]) ? $defaults[$key] : '');
 ?>
 <tr>
     <td><b><?php echo htmlspecialchars($label); ?></b></td>
@@ -320,7 +380,7 @@ run.
         <small class="text-muted"><?php echo htmlspecialchars($help); ?></small>
     </td>
 </tr>
-<?php endforeach; ?>
+<?php endforeach; endforeach; ?>
 </table>
 <button type="submit" name="fb_save" value="1" class="btn btn-primary">Save &amp; Test</button>
 <button type="submit" name="fb_test" value="1" class="btn btn-default">Test these settings (no save)</button>

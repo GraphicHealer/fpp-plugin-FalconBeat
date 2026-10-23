@@ -7,8 +7,9 @@ Run by FPP (postStart.sh / lifecycle callback). Speaks:
   - FalconBeat admin WS (ws://<server>/ws?roomId=..&creator=..) — held open
     for the duration of a playlist so the room (deleted after 60s idle)
     stays alive and listeners stay attached.
-  - FalconBeat HTTP     (POST /upload/complete — LAN only, unauthenticated)
-  - FalconBeat ingest  (PUT http://<ingest>:8090/media/<name>, Bearer token)
+  - FalconBeat HTTP     (POST /upload/complete — Bearer-gated at the edge)
+  - FalconBeat ingest  (PUT/DELETE <server>/media/<name>, PUT /config/*,
+    Bearer token) — all through the one published port
   - FPP status API     (GET http://127.0.0.1/api/fppd/status — position)
   - Local control      (unix socket: callbacks.py forwards fppd events)
 
@@ -62,13 +63,17 @@ LOG = logging.getLogger("falconbeatd")
 
 DEFAULTS = {
     "enabled": "1",
-    "beatsyncUrl": "ws://localhost:8080",
+    # LAN address of the FalconBeat edge — one published port carries the
+    # admin WS, ingest writes, and the gated HTTP endpoints. Accepts
+    # "host", "host:port", or "http(s)://host[:port]".
+    "serverAddr": "localhost",
     "roomId": "000000",
-    "creatorSecret": "",
+    # Shared token: ?creator= on the admin WS, Bearer on /upload/complete,
+    # and Bearer on ingest writes — the server's FALCONBEAT_TOKEN.
+    "falconbeatToken": "",
     "adminSecret": "",
-    "ingestUrl": "http://localhost:8090",
-    "ingestToken": "",
-    "mediaPublicUrl": "",
+    # Public base URL devices fetch from — https://host; /media is derived.
+    "publicBase": "",
     # Extra milliseconds added to the computed schedule delay when telling
     # devices where in the track to start. Tune if devices run audibly late.
     "nudgeMs": "0",
@@ -115,7 +120,24 @@ def load_settings():
             pass
         except OSError as e:
             LOG.warning("cannot read %s: %s", path, e)
+    # Derive the wire URLs from the simple fields. One edge port carries
+    # everything, so httpBase serves beatsync HTTP, ingest writes, and the
+    # gated endpoints alike.
+    secure, hostport = _split_addr(settings.get("serverAddr", ""))
+    settings["httpBase"] = ("https" if secure else "http") + "://" + hostport
+    settings["wsBase"] = ("wss" if secure else "ws") + "://" + hostport
+    pub = settings.get("publicBase", "").strip().rstrip("/")
+    settings["mediaBase"] = pub + "/media" if pub else ""
     return settings
+
+
+def _split_addr(addr):
+    """'host' | 'host:port' | scheme://host[:port] -> (secure, hostport)."""
+    addr = addr.strip().rstrip("/")
+    if "://" in addr:
+        u = urllib.parse.urlsplit(addr)
+        return u.scheme in ("https", "wss"), (u.netloc or u.path)
+    return False, addr
 
 
 def cfg_bool(s):
@@ -339,18 +361,15 @@ class FalconBeatSession:
             except OSError:
                 pass
             self.ws = None
-        u = urllib.parse.urlsplit(self.cfg["beatsyncUrl"])
-        secure = u.scheme in ("wss", "https")
-        http_base = ("https" if secure else "http") + "://" + (u.netloc or u.path)
-        self.http_base = http_base
-        ws_base = ("wss" if secure else "ws") + "://" + (u.netloc or u.path)
+        self.http_base = self.cfg["httpBase"]
+        ws_base = self.cfg["wsBase"]
         params = {
             "roomId": self.cfg["roomId"],
             "username": "falconbeat-fpp",
             "clientId": "fpp-%d" % os.getpid(),
         }
-        if self.cfg.get("creatorSecret"):
-            params["creator"] = self.cfg["creatorSecret"]
+        if self.cfg.get("falconbeatToken"):
+            params["creator"] = self.cfg["falconbeatToken"]
         if self.cfg.get("adminSecret"):
             params["admin"] = self.cfg["adminSecret"]
         url = "%s/ws?%s" % (ws_base, urllib.parse.urlencode(params))
@@ -580,7 +599,12 @@ class FalconBeatSession:
             "POST",
             self.http_base + "/upload/complete",
             body=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # The endpoint itself is unauthenticated inside beatsync —
+                # Caddy gates it on the shared FALCONBEAT_TOKEN.
+                "Authorization": "Bearer %s" % self.cfg["falconbeatToken"],
+            },
         )
         if status >= 300:
             raise RuntimeError(
@@ -589,7 +613,7 @@ class FalconBeatSession:
 
     def push_file(self, local_path, media_name):
         """PUT file to ingest -> returns public URL devices will fetch."""
-        ingest = self.cfg["ingestUrl"].rstrip("/")
+        ingest = self.cfg["httpBase"]
         quoted = urllib.parse.quote(media_name)
         with open(local_path, "rb") as f:
             data = f.read()
@@ -598,7 +622,7 @@ class FalconBeatSession:
             "%s/media/%s" % (ingest, quoted),
             body=data,
             headers={
-                "Authorization": "Bearer %s" % self.cfg["ingestToken"],
+                "Authorization": "Bearer %s" % self.cfg["falconbeatToken"],
                 "Content-Type": "application/octet-stream",
             },
             timeout=120,
@@ -610,7 +634,7 @@ class FalconBeatSession:
             stored = json.loads(resp).get("stored", media_name)
         except ValueError:
             pass
-        base = self.cfg["mediaPublicUrl"].rstrip("/") or "%s/media" % ingest
+        base = self.cfg["mediaBase"] or "%s/media" % ingest
         return "%s/%s" % (base, urllib.parse.quote(stored))
 
 
@@ -826,13 +850,13 @@ class FalconBeatDaemon:
     NOWPLAYING_HEARTBEAT_S = 30.0
 
     def _put_config(self, name, doc):
-        ingest = self.cfg["ingestUrl"].rstrip("/")
+        ingest = self.cfg["httpBase"]
         status, resp = http_request(
             "PUT",
             "%s/config/%s" % (ingest, name),
             body=json.dumps(doc).encode("utf-8"),
             headers={
-                "Authorization": "Bearer %s" % self.cfg["ingestToken"],
+                "Authorization": "Bearer %s" % self.cfg["falconbeatToken"],
                 "Content-Type": "application/json",
             },
             timeout=10,
@@ -1311,7 +1335,7 @@ class FalconBeatDaemon:
         """DELETE evicted files via ingest. Failures go to
         _pending_file_dels and are retried on the next call — a lingering
         file is harmless but shouldn't leak forever."""
-        ingest = self.cfg["ingestUrl"].rstrip("/")
+        ingest = self.cfg["httpBase"]
         for name in self._pending_file_dels | set(names):
             try:
                 quoted = urllib.parse.quote(os.path.basename(name))
@@ -1319,7 +1343,7 @@ class FalconBeatDaemon:
                     "DELETE",
                     "%s/media/%s" % (ingest, quoted),
                     headers={
-                        "Authorization": "Bearer %s" % self.cfg["ingestToken"]
+                        "Authorization": "Bearer %s" % self.cfg["falconbeatToken"]
                     },
                     timeout=15,
                 )
@@ -1469,7 +1493,7 @@ class FalconBeatDaemon:
             "pushed": sorted(self._pushed.values()),
             "registered": sorted(self._registered),
             "roomId": self.cfg.get("roomId"),
-            "beatsyncUrl": self.cfg.get("beatsyncUrl"),
+            "serverAddr": self.cfg.get("serverAddr"),
             "enabled": cfg_bool(self.cfg.get("enabled", "1")),
             "listenerCount": (
                 self.session.listener_count if self.session else 0

@@ -32,7 +32,7 @@ function fb_h($s) { return htmlspecialchars((string)$s); }
                              : '<span class="text-danger">not running</span>'; ?></td></tr>
 <?php if ($state): ?>
 <tr><td><b>Enabled</b></td><td><?php echo $state['enabled'] ? 'yes' : 'no'; ?></td></tr>
-<tr><td><b>FalconBeat</b></td><td><?php echo fb_h($state['beatsyncUrl']); ?>
+<tr><td><b>FalconBeat</b></td><td><?php echo fb_h($state['serverAddr']); ?>
     room <?php echo fb_h($state['roomId']); ?> —
     <?php echo $state['connected'] ? '<span class="text-success">connected</span>'
                                    : '<span class="text-muted">disconnected</span>'; ?></td></tr>
@@ -73,7 +73,7 @@ $cfgFile = (isset($settings['configDirectory']) ? $settings['configDirectory'] :
 $listener = '';
 if (is_readable($cfgFile)) {
     foreach (file($cfgFile) as $line) {
-        if (strpos(trim($line), 'listenerUrl') === 0) {
+        if (strpos(trim($line), 'publicBase') === 0) {
             $listener = trim(trim(explode('=', $line, 2)[1]), '"');
         }
     }

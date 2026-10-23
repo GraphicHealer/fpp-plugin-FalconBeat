@@ -34,8 +34,18 @@ pip installs are system-wide across plugins).
 
 ## FalconBeat server protocol (server beatsync submodule @ 94c38ab)
 
-- WS: `ws://host:8080/ws?roomId&username&clientId&creator=SECRET` (non-demo;
-  `?admin=` is demo-only). Plaintext JSON messages, not binary.
+One published port carries everything (server commit 5ef262b): `/ws` →
+beatsync WS, `/health`, Bearer-gated `/upload/complete` + `/discover`,
+ingest `PUT/DELETE /media/*` + `PUT /config/*` (token-checked by ingest
+itself), public `GET /media/*`, and the listener SPA. `serverAddr` in
+settings is the LAN edge (`host[:port]` or full URL — `_split_addr`
+derives `wsBase`/`httpBase`); `publicBase` is the devices' public origin
+(`mediaBase` = `<base>/media`). ONE shared secret, `falconbeatToken`
+(= the server's FALCONBEAT_TOKEN), is `?creator=` on the admin WS AND
+the Bearer on `/upload/complete` AND ingest writes.
+
+- WS: `ws://host[:port]/ws?roomId&username&clientId&creator=TOKEN`
+  (non-demo; `?admin=` is demo-only). Plaintext JSON messages, not binary.
 - Send `{"type":"PLAY","audioSource":url,"trackTimeSeconds":pos}` /
   `{"type":"PAUSE",...}` — the `SCHEDULED_ACTION` echo (match type +
   audioSource) is the ONLY acceptance signal; rejections are silent.
@@ -52,10 +62,10 @@ pip installs are system-wide across plugins).
   `_registered_at`) — covers both a URL registered during that call and
   one the playlist-start pre-push registered seconds earlier; the gate
   holds FPP meanwhile (counts against gateMaxSec).
-- Push flow (no S3): `PUT http://ingest:8090/media/<name>` (Bearer) →
-  `POST http://falconbeat:8080/upload/complete {roomId, originalName,
-  publicUrl}` — devices then fetch `mediaPublicUrl/<name>` from Caddy.
-  upload/complete is unauthenticated → stays LAN-only, never proxied.
+- Push flow (no S3): `PUT <edge>/media/<name>` (Bearer TOKEN) →
+  `POST <edge>/upload/complete {roomId, originalName, publicUrl}` with
+  the same Bearer TOKEN (Caddy gates it — 403 without) — devices then
+  fetch `<publicBase>/media/<name>` from the edge's file_server.
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
   payload sections if present, else `GET /api/playlist/<name>` using the

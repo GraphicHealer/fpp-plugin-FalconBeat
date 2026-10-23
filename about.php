@@ -23,9 +23,9 @@ a few seconds after the playlist ends.</li>
 
 <h4>Configuration</h4>
 <p>
-Content Setup &rarr; FalconBeat. You need the FalconBeat WS URL, room ID and
-creator secret, the ingest URL + token, and the public media URL devices use
-to fetch audio.
+Content Setup &rarr; FalconBeat. You need the server's LAN address (one
+published port carries the admin socket, uploads and ingest), the public
+URL devices open to listen, the room ID, and the shared server token.
 </p>
 
 <h4>Troubleshooting</h4>
