@@ -1,0 +1,164 @@
+{
+    "settingGroups": {
+        "FalconBeat": {
+            "description": "FalconBeat",
+            "level": 0,
+            "settings": [
+                "enabled",
+                "serverAddr",
+                "falconbeatToken",
+                "syncOffsetMs"
+            ]
+        },
+        "FalconBeatAdvanced": {
+            "description": "Advanced",
+            "level": 1,
+            "settings": [
+                "roomId",
+                "adminSecret",
+                "gateMaxSec",
+                "preloadSettleMs"
+            ]
+        },
+        "FalconBeatDeveloper": {
+            "description": "Developer",
+            "level": 3,
+            "settings": [
+                "nudgeMs",
+                "disconnectGraceSec"
+            ]
+        }
+    },
+    "settings": {
+        "enabled": {
+            "name": "enabled",
+            "description": "Enabled",
+            "tip": "Master switch — when off, playback events are ignored.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "checkbox",
+            "checkedValue": "1",
+            "uncheckedValue": "0",
+            "default": "1"
+        },
+        "serverAddr": {
+            "name": "serverAddr",
+            "description": "Server (LAN)",
+            "tip": "FalconBeat server on your LAN: falconbeat.local or falconbeat.local:9080. One published port carries everything — the admin socket, uploads, ingest writes and media.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "text",
+            "size": 40,
+            "maxlength": 128,
+            "default": ""
+        },
+        "falconbeatToken": {
+            "name": "falconbeatToken",
+            "description": "Server Token",
+            "tip": "FALCONBEAT_TOKEN on the server — one shared secret for the admin socket, upload completion and ingest writes.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "password",
+            "size": 40,
+            "maxlength": 128,
+            "default": ""
+        },
+        "syncOffsetMs": {
+            "name": "syncOffsetMs",
+            "description": "Sync Offset",
+            "tip": "The timing knob — shifts when FPP's media is released relative to the devices' scheduled start. Raise it if the audio runs ahead of the lights, lower it if the audio trails.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 0,
+            "type": "number",
+            "min": 0,
+            "max": 5000,
+            "step": 10,
+            "default": "250",
+            "suffix": "ms"
+        },
+        "roomId": {
+            "name": "roomId",
+            "description": "Room ID",
+            "tip": "6-digit room code. The listener page joins 000000 by default (?room= overrides it) — change both together.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 1,
+            "type": "text",
+            "size": 8,
+            "maxlength": 6,
+            "default": "000000"
+        },
+        "adminSecret": {
+            "name": "adminSecret",
+            "description": "Admin Secret",
+            "tip": "Optional: demo-mode ?admin= secret. Not used by the normal token auth — usually left blank.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 1,
+            "type": "password",
+            "size": 40,
+            "maxlength": 128,
+            "default": ""
+        },
+        "gateMaxSec": {
+            "name": "gateMaxSec",
+            "description": "Sync Gate",
+            "tip": "Hold each track's start until devices confirm loaded (max seconds). 0 = off.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 1,
+            "type": "number",
+            "min": 0,
+            "max": 60,
+            "step": 1,
+            "default": "10",
+            "suffix": "s"
+        },
+        "preloadSettleMs": {
+            "name": "preloadSettleMs",
+            "description": "Preload Settle",
+            "tip": "When a track is pushed at play time, wait this long before PLAY so devices can download over WAN. Counts against the sync gate. 0 = off.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 1,
+            "type": "number",
+            "min": 0,
+            "max": 30000,
+            "step": 100,
+            "default": "2500",
+            "suffix": "ms"
+        },
+        "nudgeMs": {
+            "name": "nudgeMs",
+            "description": "Extra Delay",
+            "tip": "Added to the computed schedule delay for the device track offset. 0 = auto.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 3,
+            "type": "number",
+            "min": -1000,
+            "max": 5000,
+            "step": 10,
+            "default": "0",
+            "suffix": "ms"
+        },
+        "disconnectGraceSec": {
+            "name": "disconnectGraceSec",
+            "description": "Disconnect grace",
+            "tip": "Seconds the admin socket is held after playlist stop so listeners see the pause land.",
+            "restart": 0,
+            "reboot": 0,
+            "level": 3,
+            "type": "number",
+            "min": 0,
+            "max": 600,
+            "step": 1,
+            "default": "5",
+            "suffix": "s"
+        }
+    }
+}

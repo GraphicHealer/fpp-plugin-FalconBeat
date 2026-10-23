@@ -1,57 +1,57 @@
 {
-	"repoName": "fpp-plugin-FalconBeat",
-	"name": "FalconBeat",
-	"author": "GraphicHealer",
-	"description": "A self-hosted way to play your show's audio on visitors' devices, in sync with the lights using a FalconBeat server.",
-	"homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
-	"iconURL": "https://raw.githubusercontent.com/GraphicHealer/fpp-plugin-FalconBeat/master/icon.png",
-	"srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
-	"bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",
-	"documentation": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/blob/master/README.md",
-	"allowUpdates": 1,
-	"releaseNotesStyle": "gitHistory",
-	"privacy": {
-		"summary": "Sends your show audio and play/pause commands to the FalconBeat server you configure, so visitors can listen in sync on their own devices.",
-		"sends": [
-			{
-				"to": "the FalconBeat server you configure",
-				"what": "show audio files, playback commands, server token",
-				"why": "to let visitors' devices play the show audio in sync with the lights",
-				"alwaysOn": false
-			}
-		],
-		"collects": [],
-		"sensors": [],
-		"remoteAccess": "none",
-		"systemChanges": [
-			{
-				"kind": "service",
-				"what": "runs a Python daemon (falconbeatd) while fppd runs; local unix socket only"
-			},
-			{
-				"kind": "network",
-				"what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) — not reachable off-host"
-			},
-			{
-				"kind": "core-settings",
-				"what": "sets restartFlag on install/upgrade so fppd reloads the new plugin code"
-			}
-		],
-		"closedCode": false,
-		"other": "Secrets are stored mode-0600 under plugindata, outside the shared config directory; the daemon listens only on a local unix socket."
-	},
-	"versions": [
-		{
-			"minFPPVersion": "9.0",
-			"maxFPPVersion": "9.99",
-			"branch": "master",
-			"sha": ""
-		},
-		{
-			"minFPPVersion": "10.0",
-			"maxFPPVersion": "0",
-			"branch": "master",
-			"sha": ""
-		}
-	]
+    "repoName": "fpp-plugin-FalconBeat",
+    "name": "FalconBeat",
+    "author": "GraphicHealer",
+    "description": "A self-hosted way to play your show's audio on visitors' devices, in sync with the lights using a FalconBeat server.",
+    "homeURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat",
+    "iconURL": "https://raw.githubusercontent.com/GraphicHealer/fpp-plugin-FalconBeat/master/icon.png",
+    "srcURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat.git",
+    "bugURL": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/issues",
+    "documentation": "https://github.com/GraphicHealer/fpp-plugin-FalconBeat/blob/master/README.md",
+    "allowUpdates": 1,
+    "releaseNotesStyle": "gitHistory",
+    "privacy": {
+        "summary": "Sends your show audio and play/pause commands to the FalconBeat server you configure, so visitors can listen in sync on their own devices.",
+        "sends": [
+            {
+                "to": "the FalconBeat server you configure",
+                "what": "show audio files, playback commands, server token",
+                "why": "to let visitors' devices play the show audio in sync with the lights",
+                "alwaysOn": false
+            }
+        ],
+        "collects": [],
+        "sensors": [],
+        "remoteAccess": "none",
+        "systemChanges": [
+            {
+                "kind": "service",
+                "what": "runs a Python daemon (falconbeatd) while fppd runs; local unix socket only"
+            },
+            {
+                "kind": "network",
+                "what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) \u00e2\u20ac\u201d not reachable off-host"
+            },
+            {
+                "kind": "core-settings",
+                "what": "sets restartFlag on install/upgrade so fppd reloads the new plugin code"
+            }
+        ],
+        "closedCode": false,
+        "other": "The server token is stored as a password setting in config/plugin.fpp-plugin-FalconBeat (FPP's standard plugin settings file); the daemon listens only on a local unix socket."
+    },
+    "versions": [
+        {
+            "minFPPVersion": "9.0",
+            "maxFPPVersion": "9.99",
+            "branch": "master",
+            "sha": ""
+        },
+        {
+            "minFPPVersion": "10.0",
+            "maxFPPVersion": "0",
+            "branch": "master",
+            "sha": ""
+        }
+    ]
 }

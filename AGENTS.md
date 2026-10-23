@@ -10,6 +10,9 @@ pip installs are system-wide across plugins).
 
 - `callbacks.py` — fppd entry point, keep it FAST (fppd waitpid()s on it)
 - `falconbeatd.py` — the daemon: MiniWS client + FalconBeat session + control socket
+- `settings.json` — declarative field/group schema FPP renders natively
+  (PrintSettingGroup, per-field AJAX save, uiLevel-gated groups:
+  0 Basic / 1 Advanced / 3 Developer)
 - `content.php` / `status.php` / `about.php` + `menu.inc` — FPP UI
 - `scripts/{fpp_install,fpp_uninstall,postStart,preStop}.sh` — lifecycle
 - `pluginInfo.json` — strict JSON (no comments); `repoName` must equal the
@@ -122,7 +125,11 @@ python -m py_compile falconbeatd.py callbacks.py
 ```
 
 FPP settings live in `config/plugin.fpp-plugin-FalconBeat` (key=value);
-daemon re-reads them per event — no restart needed. Plugin log:
+settings.json fields save there via FPP's SetPluginSetting — including the
+token (a `password` field). `plugindata/.../secrets` is a legacy fallback:
+load_settings reads secrets FIRST, then the plugin file on top, so a key
+present in the settings file (even emptied) wins over a stale secrets copy.
+Daemon re-reads them per event — no restart needed. Plugin log:
 `logs/plugin-fpp-plugin-FalconBeat.log` (FPP rotates; keep exactly this name).
 Daemon runtime state: `plugindata/fpp-plugin-FalconBeat/{falconbeatd.sock,
 falconbeatd.pid,status.json}`.
