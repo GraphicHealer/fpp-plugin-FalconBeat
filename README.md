@@ -29,9 +29,10 @@ FalconBeat Status shows the live connection state.
 
 ## Notes
 
-- The server token is stored as a password field in the standard plugin
-  settings file (`config/plugin.fpp-plugin-FalconBeat`) — the same place
-  FPP keeps its own credentials.
+- Secrets are stored in `plugindata/fpp-plugin-FalconBeat/secrets` mode
+  `0600` — never in `config/`, so backups and crash bundles don't carry
+  them. The token field on the settings page renders blank even when a
+  value is saved.
 - Logs: File Manager &rarr; Logs &rarr; `plugin-fpp-plugin-FalconBeat.log`.
 - The admin socket, `/upload/complete`, and ingest are LAN-only by design;
   only browsers reach the server through public ingress.

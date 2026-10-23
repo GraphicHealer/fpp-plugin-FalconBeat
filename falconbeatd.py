@@ -99,11 +99,11 @@ DEFAULTS = {
 
 def load_settings():
     settings = dict(DEFAULTS)
-    # plugindata/secrets (0600) first — legacy installs stored the tokens
-    # there — then config/plugin.* on top so a key present in the settings
-    # file (even emptied) wins over a stale secrets copy. New saves land in
-    # the settings file via FPP's SetPluginSetting; secrets only fills gaps.
-    for path in (SECRETS_PATH, SETTINGS_PATH):
+    # config/plugin.* first, then plugindata/secrets (0600) on top —
+    # credentials live outside config/ so backups and crash bundles
+    # never carry them (PLUGIN_GUIDELINES §14.4/§14.11). A key still in
+    # plugin.* (pre-migration save) is used when secrets lacks it.
+    for path in (SETTINGS_PATH, SECRETS_PATH):
         try:
             with open(path, "r") as f:
                 for line in f:

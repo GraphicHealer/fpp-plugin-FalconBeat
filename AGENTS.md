@@ -125,11 +125,14 @@ python -m py_compile falconbeatd.py callbacks.py
 ```
 
 FPP settings live in `config/plugin.fpp-plugin-FalconBeat` (key=value);
-settings.json fields save there via FPP's SetPluginSetting — including the
-token (a `password` field). `plugindata/.../secrets` is a legacy fallback:
-load_settings reads secrets FIRST, then the plugin file on top, so a key
-present in the settings file (even emptied) wins over a stale secrets copy.
-Daemon re-reads them per event — no restart needed. Plugin log:
+settings.json fields save there via FPP's SetPluginSetting — EXCEPT the two
+credential fields (`falconbeatToken`, `adminSecret`): they keep the native
+password row but override `onChange` to POST back to content.php, which
+writes `plugindata/.../secrets` (0600) — §14.11 keeps credentials out of
+config/ because the JSON backup carries plugin configs in clear. The daemon
+reads plugin.* first, then secrets on top; a pre-migration token still in
+plugin.* is used until the settings page migrates it. Daemon re-reads them
+per event — no restart needed. Plugin log:
 `logs/plugin-fpp-plugin-FalconBeat.log` (FPP rotates; keep exactly this name).
 Daemon runtime state: `plugindata/fpp-plugin-FalconBeat/{falconbeatd.sock,
 falconbeatd.pid,status.json}`.

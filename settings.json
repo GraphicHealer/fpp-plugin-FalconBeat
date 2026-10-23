@@ -57,11 +57,12 @@
         "falconbeatToken": {
             "name": "falconbeatToken",
             "description": "Server Token",
-            "tip": "FALCONBEAT_TOKEN on the server — one shared secret for the admin socket, upload completion and ingest writes.",
+            "tip": "FALCONBEAT_TOKEN on the server — one shared secret for the admin socket, upload completion and ingest writes. Stored mode-0600 under plugindata, outside config/ — shows blank even when saved.",
             "restart": 0,
             "reboot": 0,
             "level": 0,
             "type": "password",
+            "onChange": "fbSaveSecret.bind(null, \"falconbeatToken\", this)",
             "size": 40,
             "maxlength": 128,
             "default": ""
@@ -95,11 +96,12 @@
         "adminSecret": {
             "name": "adminSecret",
             "description": "Admin Secret",
-            "tip": "Optional: demo-mode ?admin= secret. Not used by the normal token auth — usually left blank.",
+            "tip": "Optional: demo-mode ?admin= secret. Not used by the normal token auth — usually left blank. Stored mode-0600 under plugindata — shows blank even when saved.",
             "restart": 0,
             "reboot": 0,
             "level": 1,
             "type": "password",
+            "onChange": "fbSaveSecret.bind(null, \"adminSecret\", this)",
             "size": 40,
             "maxlength": 128,
             "default": ""

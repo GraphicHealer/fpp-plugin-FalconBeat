@@ -30,7 +30,7 @@
             },
             {
                 "kind": "network",
-                "what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) \u00e2\u20ac\u201d not reachable off-host"
+                "what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) â€” not reachable off-host"
             },
             {
                 "kind": "core-settings",
@@ -38,7 +38,7 @@
             }
         ],
         "closedCode": false,
-        "other": "The server token is stored as a password setting in config/plugin.fpp-plugin-FalconBeat (FPP's standard plugin settings file); the daemon listens only on a local unix socket."
+        "other": "Secrets are stored mode-0600 under plugindata, outside the shared config directory; the daemon listens only on a local unix socket."
     },
     "versions": [
         {

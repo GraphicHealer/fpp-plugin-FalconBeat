@@ -8,6 +8,10 @@
  * config/plugin.fpp-plugin-FalconBeat) and gates groups on uiLevel —
  * 0 Basic / 1 Advanced / 3 Developer. There is no form and no save loop.
  *
+ * Exception: the two credential fields keep the native row but override
+ * onChange to post here instead — §14.11 requires secrets in
+ * plugindata/secrets (0600), never in config/ where backups carry them.
+ *
  * The FalconBeat edge is ONE published port: serverAddr carries the admin
  * WS, ingest writes, and the gated HTTP endpoints; one FALCONBEAT_TOKEN is
  * ?creator= on the WS and Bearer on /upload/complete + ingest writes.
@@ -18,9 +22,9 @@
 
 $pluginName = 'fpp-plugin-FalconBeat';
 
-// Keys older versions stored in plugindata/secrets (0600). New saves land
-// in config/plugin.<name> via the declarative fields; the secrets file is
-// only a legacy fallback — see fb_get() / load_settings() precedence.
+// Credentials live under plugindata/ mode 0600, never in config/ — the
+// JSON backup carries config/plugin.* in clear (§14.11). The settings.json
+// rows stay declarative for masking/layout; their onChange posts here.
 $secretKeys = array('falconbeatToken', 'adminSecret');
 
 function fb_secrets_path() {
@@ -42,12 +46,54 @@ function fb_secret_get($key) {
     return null;
 }
 
-// Saved-value lookup for the connection test. The plugin settings file is
-// authoritative whenever the key is present (even empty — blanking a field
-// must clear a stale secrets copy); plugindata/secrets only supplies keys
-// the settings file lacks.
+// Write a credential into plugindata/secrets (0600), preserving any other
+// keys, and blank the same key in config/plugin.<name> so nothing secret
+// sits where a JSON backup or crash bundle would carry it.
+function fb_secret_save($key, $value) {
+    global $pluginName;
+    $file = fb_secrets_path();
+    $vals = array();
+    if (is_readable($file)) {
+        foreach (file($file) as $line) {
+            $line = trim($line);
+            if ($line === '' || strpos($line, '=') === false) continue;
+            list($k, $v) = explode('=', $line, 2);
+            $vals[trim($k)] = trim(trim($v), '"');
+        }
+    }
+    $vals[$key] = $value;
+    $dir = dirname($file);
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    $body = '';
+    foreach ($vals as $k => $v)
+        $body .= $k . ' = "' . str_replace('"', '', $v) . "\"\n";
+    $ok = file_put_contents($file, $body, LOCK_EX) !== false;
+    @chmod($file, 0600);
+    if (function_exists('WriteSettingToFile'))
+        WriteSettingToFile($key, '', $pluginName);
+    return $ok;
+}
+
+// Migration: a build briefly saved credentials into config/plugin.<name>
+// through the declarative fields. Move any residue into the secrets file
+// (secrets win if both exist — that file is the current write target).
+foreach ($secretKeys as $sk) {
+    $pv = function_exists('ReadSettingFromFile') ? ReadSettingFromFile($sk, $pluginName) : null;
+    if ($pv !== null && $pv !== false && $pv !== '') {
+        if (fb_secret_get($sk) === null) fb_secret_save($sk, $pv);
+        else if (function_exists('WriteSettingToFile')) WriteSettingToFile($sk, '', $pluginName);
+    }
+}
+
+// Saved-value lookup for the connection test. plugindata/secrets is
+// authoritative for credentials; the plugin settings file is only a
+// fallback so a pre-migration token still tests correctly.
 function fb_get($key, $default = '') {
     global $pluginName, $secretKeys, $settings;
+    if (in_array($key, $secretKeys)) {
+        $v = fb_secret_get($key);
+        if ($v !== null && $v !== '') return $v;
+    }
     if (function_exists('ReadSettingFromFile')) {
         $v = ReadSettingFromFile($key, $pluginName);
         if ($v !== false && $v !== null) return $v;
@@ -62,10 +108,6 @@ function fb_get($key, $default = '') {
                 if (trim($k) === $key) return trim(trim($v), '"');
             }
         }
-    }
-    if (in_array($key, $secretKeys)) {
-        $v = fb_secret_get($key);
-        if ($v !== null && $v !== '') return $v;
     }
     return $default;
 }
@@ -203,6 +245,17 @@ function fb_tests($v) {
     return $results;
 }
 
+// Credential save endpoint — the settings.json rows' onChange posts here
+// instead of FPP's SetPluginSetting, keeping secrets out of config/.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_secret'])) {
+    $key = $_POST['fb_secret'];
+    $val = isset($_POST['fb_secret_value']) ? $_POST['fb_secret_value'] : '';
+    $ok = in_array($key, $secretKeys) && fb_secret_save($key, $val);
+    if (!headers_sent()) header('Content-Type: application/json');
+    echo json_encode(array('ok' => $ok));
+    exit;
+}
+
 $testResults = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fb_test'])) {
     $v = array(
@@ -231,6 +284,27 @@ PrintSettingGroup('FalconBeatAdvanced', '', '', 1, $pluginName);
 PrintSettingGroup('FalconBeatDeveloper', '', '', 1, $pluginName);
 ?>
 </div>
+
+<script>
+// The credential rows render blank by design — their values live in
+// plugindata/secrets (0600), not the plugin settings file. onChange posts
+// the new value here; the placeholder shows whether a value is on file.
+function fbSaveSecret(key, el) {
+    var fd = new FormData();
+    fd.append('fb_secret', key);
+    fd.append('fb_secret_value', el.value);
+    fetch(location.pathname + location.search, { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (window.$ && $.jGrowl) $.jGrowl(d.ok ? key + ' saved' : 'Save failed — check plugindata permissions');
+            if (d.ok) el.placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022 saved \u2014 type to replace';
+        });
+}
+<?php foreach ($secretKeys as $sk): if (fb_secret_get($sk) !== null): ?>
+document.getElementById('<?php echo $sk; ?>').placeholder =
+    '\u2022\u2022\u2022\u2022\u2022\u2022 saved \u2014 type to replace';
+<?php endif; endforeach; ?>
+</script>
 
 <fieldset>
 <legend>Connection test</legend>
