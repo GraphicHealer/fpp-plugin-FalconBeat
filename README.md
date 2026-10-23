@@ -12,10 +12,13 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 - The daemon holds the server's admin socket open for the playlist and
   keeps a rolling two-track window: only the current and next tracks are
   uploaded to ingest and registered on the room, so devices download each
-  track during the previous song instead of the whole show at once.
-- Each track start is gated until devices confirm the audio loaded; FPP and
-  the devices then start at the same scheduled instant. Pauses and stops
-  send PAUSE.
+  track during the previous song instead of the whole show at once. On a
+  repeating playlist the window wraps — while the last song plays, the
+  first song is already back in the room as "next".
+- Each track start can be held until the server accepts the play command
+  (the Sync Gate — devices that haven't finished downloading sync in at
+  the right offset). FPP and the devices then start at the same scheduled
+  instant; pauses and stops send PAUSE.
 - Played or skipped tracks are evicted from the room and deleted from
   ingest. `nowplaying.json` (heartbeated while playing) drives the listener
   page's title/artist and off-air banner; the status page shows the live
@@ -23,9 +26,16 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 
 ## Configure
 
-Input/Output Setup &rarr; FalconBeat: the server's LAN address (one published
-port carries everything) and the shared server token. Status &rarr;
-FalconBeat Status shows the live connection state.
+Input/Output Setup &rarr; FalconBeat. Four fields are all it needs:
+
+- **Server (LAN)** — `falconbeat.local` or `host:port`; one published port
+  carries everything.
+- **Server Token** — the `FALCONBEAT_TOKEN` from your server.
+- **Sync Offset** — nudge device start timing against FPP's media-start
+  latency. Raise it if the audio runs ahead of the lights.
+
+Advanced and Developer groups appear when you raise FPP's UI level.
+Status &rarr; FalconBeat Status shows the live connection state.
 
 **Show Info** (same page): name, tagline, hosted-by, schedule, location,
 description, links (`Label = URL`, one per line), and your public listener
