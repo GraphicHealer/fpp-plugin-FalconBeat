@@ -1106,6 +1106,10 @@ class FalconBeatDaemon:
         keep_names = {media_name}
         if 0 <= self._queue_idx + 1 < len(self._queue):
             keep_names.add(self._queue[self._queue_idx + 1])
+            # Cursor only just advanced — add "up next" to the now-playing
+            # doc (it was pushed early, before the cursor moved).
+            doc["next"] = self._queue[self._queue_idx + 1]
+            self._set_nowplaying(doc)
         keep_urls = {
             u for n, u in self._pushed.items()
             if n in keep_names
