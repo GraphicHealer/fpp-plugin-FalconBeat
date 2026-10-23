@@ -51,10 +51,10 @@ $sections = array(
         array('enabled',         'Enabled',          'checkbox', 'Master switch — when off, playback events are ignored.'),
         array('serverAddr',      'Server (LAN)',     'text',     'FalconBeat server on your LAN: falconbeat.local or falconbeat.local:9080 (one published port carries everything).'),
         array('publicBase',      'Public URL',       'text',     'e.g. https://falconbeat.example.com — where devices open the listener page and fetch /media.'),
-        array('roomId',          'Room ID',          'text',     '6-digit room code, e.g. 000000.'),
         array('falconbeatToken', 'Server Token',     'password', 'FALCONBEAT_TOKEN on the server — one shared secret for admin WS, uploads and ingest writes.'),
     )),
     array('level' => 1, 'title' => 'Advanced', 'fields' => array(
+        array('roomId',          'Room ID',          'text',     '6-digit room code. The listener page joins 000000 by default (?room= overrides it) — change both together.'),
         array('adminSecret',     'Admin Secret',     'password', 'Optional: demo-mode ?admin= secret. Usually left blank.'),
         array('gateMaxSec',      'Sync Gate (sec)',  'text',     'Hold each track\'s start until devices confirm loaded (max seconds). 0 = off.'),
         array('preloadSettleMs', 'Preload Settle (ms)', 'text',  'When a track is pushed at play time, wait this long before PLAY so devices can download over WAN. Counts against the sync gate. 0 = off.'),
