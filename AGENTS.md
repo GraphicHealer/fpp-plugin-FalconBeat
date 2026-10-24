@@ -57,16 +57,36 @@ writes — never a query string (proxy access logs would capture it).
 - WS: `ws://host[:port]/ws?roomId&username&clientId` with header
   `Authorization: Bearer TOKEN` (server build accepts header or legacy
   `?creator=`; `?admin=` is demo-only). Plaintext JSON, not binary.
-- Send `{"type":"PLAY","audioSource":url,"trackTimeSeconds":pos}` /
-  `{"type":"PAUSE",...}` — the `SCHEDULED_ACTION` echo (match type +
-  audioSource) is the ONLY acceptance signal; rejections are silent.
-- `trackTimeSeconds` is the playback offset at execute time — send FPP
-  position (sampled live at event time) + expected delay =
-  `max(400, 1.5*maxClientRTT+200, maxCompensation+200)`ms capped 3s
-  (we compute it from CLIENT_CHANGE stats + our own NTP RTT; `nudgeMs`
-  setting adds on top) + `syncOffsetMs` (the user-facing tune knob).
-  Devices land a schedule-delay late but at the RIGHT position — no
-  gating of FPP, ever; a missed join is a late join at the same beat.
+- Send `{"type":"PLAY","audioSource":url,"trackTimeSeconds":pos,
+  "executeAtServerTime":ms}` / `{"type":"PAUSE",...}` — the
+  `SCHEDULED_ACTION` echo (match type + audioSource) is the ONLY
+  acceptance signal; rejections are silent.
+- `executeAtServerTime` (optional, server Dockerfile patch) pins the
+  absolute server-clock instant the action executes. The first PLAY of a
+  session is a capability probe (+77ms skew so a server's own ~450ms
+  delay can't false-positive): the echo's `serverTimeToExecute` is
+  compared to what we sent — honored => `execat_supported`, rejected =>
+  all commands that session fall back to server-chosen instants
+  (`now + max(400, 1.5*maxClientRTT+200, maxCompensation+200)` capped 3s,
+  computed from CLIENT_CHANGE stats + our own NTP RTT; `nudgeMs` adds on).
+- `trackTimeSeconds` is the playback offset at execute time — the daemon
+  extrapolates the sampled FPP position to the execute instant and adds
+  `syncOffsetMs` (the user-facing tune knob).
+- Anchored transitions (patched server): media event T2 = callback ts +
+  PREP_DELAY_S (fppd fires media callbacks in PreparePlay, ~0.45s before
+  audio) — devices start from pos~0 at one anchored instant, same bias
+  every song, tunable. Pre-schedule: while `seconds_remaining` ≤
+  PRE_SCHEDULE_AHEAD_S (4.5s, > the server's 3s load window) the
+  reconciler broadcasts the NEXT track's PLAY early (executeAt =
+  transition + SCHEDULE_GAP_S) — insurance for late callbacks; the real
+  media event then refines it (a newer PLAY supersedes the pending node
+  client-side); on stop/pause the daemon PAUSEs the pending source just
+  before its armed start so a stale schedule never fires into the gap.
+  ~0.9s after each PLAY a verify pass
+  compares device-vs-fppd position; a >0.3s miss sends ONE corrective
+  pos-anchored PLAY. Old server: every PLAY is `pos + predicted delay`
+  at `now + delay` — devices land a schedule-delay late but on the right
+  beat; no gating of FPP, ever.
 - Server load-coordination clock starts at PLAY: it waits ≤3s for client
   AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Devices fetch audio
   over WAN — a freshly registered URL may not fit in 3s → they SYNC in

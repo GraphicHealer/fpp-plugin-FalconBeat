@@ -16,10 +16,13 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
   repeating playlist the window wraps — while the last song plays, the
   first song is already back in the room as "next".
 - Playback events are fire-and-forget — FPP's timing is never held up.
-  Devices execute each play on the server's synchronized clock at the
-  computed track offset: a listener that starts a beat late still lands
-  on the right note. Video entries upload their extracted soundtrack,
-  not the whole video. Pauses and stops send PAUSE.
+  Near each track's end the daemon pre-schedules the next song's play on
+  the server's synchronized clock, so every song starts at a pinned
+  instant with the same bias — consistent song after song (an older
+  server build just ignores the pinned time and each play lands at the
+  right offset a schedule-delay late). A self-check after each start
+  corrects any large miss once. Video entries upload their extracted
+  soundtrack, not the whole video. Pauses and stops send PAUSE.
 - Played or skipped tracks are evicted from the room and deleted from
   ingest. `nowplaying.json` (heartbeated while playing) drives the listener
   page's title/artist and off-air banner; the status page shows the live

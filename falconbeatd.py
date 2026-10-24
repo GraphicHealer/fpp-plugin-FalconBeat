@@ -385,6 +385,9 @@ class FalconBeatSession:
         self._ntp_req = {}  # probeGroupId -> [t0_first, t0_second]
         self._ntp_seq = 0
         self._gen = 0  # connection generation; stale threads exit when it moves
+        # Does this server honor executeAtServerTime? None until the first
+        # SCHEDULED_ACTION echo proves it (echo returns the honored stamp).
+        self.execat_supported = None
 
     # -- connection ----------------------------------------------------
 
@@ -581,6 +584,10 @@ class FalconBeatSession:
         waiter = {
             "type": request["type"],
             "audioSource": request.get("audioSource"),
+            # Two PLAYs for one source (pre-schedule + refine) each echo —
+            # match on executeAt too so a stale echo can't satisfy the
+            # newer waiter.
+            "executeAt": request.get("executeAtServerTime"),
             "result": None,
         }
         with self._echo_cond:
@@ -615,10 +622,53 @@ class FalconBeatSession:
                     continue
                 if w["audioSource"] and action.get("audioSource") != w["audioSource"]:
                     continue
+                if w["executeAt"] is not None and \
+                        action.get("executeAtServerTime") != w["executeAt"]:
+                    continue
                 w["result"] = msg
             self._echo_cond.notify_all()
             self._echo_waiters = [w for w in self._echo_waiters
                                   if w["result"] is None]
+
+    def send_play(self, url, pos, exec_ms=None, timeout=8.0):
+        """PLAY url at track position pos. exec_ms pins the absolute server
+        time the action executes at — ignored (stripped) by servers without
+        the executeAtServerTime patch, which fall back to now+dynamicDelay."""
+        req = {
+            "type": "PLAY",
+            "audioSource": url,
+            "trackTimeSeconds": pos,
+        }
+        if exec_ms is not None:
+            req["executeAtServerTime"] = int(exec_ms)
+        echo = self.send_command(req, timeout)
+        self._negotiate_execat(exec_ms, echo)
+        return echo
+
+    def send_pause(self, url, pos, exec_ms=None, timeout=8.0):
+        req = {
+            "type": "PAUSE",
+            "audioSource": url,
+            "trackTimeSeconds": pos,
+        }
+        if exec_ms is not None:
+            req["executeAtServerTime"] = int(exec_ms)
+        return self.send_command(req, timeout)
+
+    def _negotiate_execat(self, exec_ms, echo):
+        """The echo's serverTimeToExecute reveals whether the build honored
+        our absolute execute time. Honored once => use it from then on;
+        rejected => fall back to server-chosen instants for this session."""
+        if exec_ms is None:
+            return
+        got = echo.get("serverTimeToExecute")
+        if not isinstance(got, (int, float)):
+            return
+        agreed = abs(got - exec_ms) <= 60
+        if self.execat_supported is None:
+            self.execat_supported = agreed
+            LOG.info("executeAtServerTime %s by server",
+                     "honored" if agreed else "ignored — falling back")
 
     # -- HTTP helpers ----------------------------------------------------
 
@@ -866,6 +916,9 @@ class FalconBeatDaemon:
         self._sysinfo = None    # cached FPP system info (None = retry)
         self._failed_media = {}  # filename -> epoch of last failed lookup
         self._pb_lock = threading.Lock()  # serialize play()/pause()
+        self._presched = None   # {media, url, t_local} pending pre-schedule
+        self._tick = threading.Event()  # wake reconciler onto fast cadence
+        self._last_play = None  # last PLAY sent, for the verify pass
         self._outages = set()   # log-once keys for down-server warnings
         self._state_sig = None  # last status.json content signature
         self._state_written = 0.0
@@ -1076,6 +1129,49 @@ class FalconBeatDaemon:
         except Exception as e:
             self._outage("show", "show config push failed: %s" % e)
 
+    # -- pre-scheduled next-track PLAY ------------------------------------
+    # While the current song winds down we broadcast the next track's PLAY
+    # with an absolute executeAt — devices arm a future start INSTEAD of
+    # racing the transition. The media callback then refines the instant
+    # (supersede is free client-side). This is insurance: it only matters
+    # when the callback arrives late or the device set is slow to ACK.
+
+    def _maybe_preschedule(self, st):
+        if self._presched is not None:
+            return
+        try:
+            rem = float(st.get("seconds_remaining") or 0)
+        except (TypeError, ValueError):
+            return
+        if not (0 < rem <= self.PRE_SCHEDULE_AHEAD_S):
+            return
+        nxt_i = self._queue_next_idx()
+        if nxt_i < 0:
+            return
+        name = self._queue[nxt_i]
+        if name not in self._pushed:
+            return  # lookahead hasn't delivered it — the event path copes
+        off = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
+        try:
+            url = self.ensure_source(name)
+            session = self._connect()
+            t1_local = time.time() + rem + self.SCHEDULE_GAP_S + off
+            # Position at T1 ≈ the gap estimate: if T1 lands exactly on the
+            # real transition devices start at ~0; error is bounded by the
+            # gap mis-estimate, and the refine supersedes it anyway.
+            pos_at = self.SCHEDULE_GAP_S + off
+            session.send_play(
+                url, max(0.0, pos_at),
+                session.server_now_ms()
+                + (t1_local - time.time()) * 1000.0)
+            self._presched = {
+                "media": name, "url": url, "t_local": t1_local,
+            }
+            LOG.info("pre-scheduled %s (fires in %.1fs)",
+                     name, t1_local - time.time())
+        except Exception as e:
+            LOG.warning("pre-schedule %s failed: %s", name, e)
+
     # -- fppd status reconciler ------------------------------------------
     # The callbacks only fire on NEW transitions: a playlist already playing
     # when the daemon comes up (fppd restarted, schedule resumed mid-show,
@@ -1086,6 +1182,17 @@ class FalconBeatDaemon:
     RECONCILE_PERIOD_S = 3.0
     IDLE_PERIOD_S = 30.0  # callbacks announce transitions; this is a net
     FAILED_RETRY_S = 60.0
+    # Pre-scheduling (option C): while a track plays, send the next one's
+    # PLAY early with an absolute executeAt so devices hold a future start
+    # instead of racing the transition. The media event then refines it.
+    # The window must exceed the server's 3s audio-load timeout.
+    PRE_SCHEDULE_AHEAD_S = 4.5
+    # Estimated media-end → next-audio gap for the insurance schedule only.
+    SCHEDULE_GAP_S = 0.4
+    # Estimated fppd PreparePlay → audio-start latency anchoring T2.
+    PREP_DELAY_S = 0.45
+    VERIFY_DELAY_S = 0.9
+    VERIFY_ERR_S = 0.30
 
     def _reconcile_loop(self):
         while not self._shutdown.is_set():
@@ -1093,7 +1200,9 @@ class FalconBeatDaemon:
             # events drive everything while a show is actually running.
             period = (self.RECONCILE_PERIOD_S if self._playlist_active
                       else self.IDLE_PERIOD_S)
-            if self._shutdown.wait(period):
+            self._tick.wait(period)  # _play kicks us onto the fast cadence
+            self._tick.clear()
+            if self._shutdown.is_set():
                 break
             try:
                 self.cfg = load_settings()
@@ -1117,6 +1226,9 @@ class FalconBeatDaemon:
                 if song in ("0", "none"):
                     song = ""
 
+                if self._presched and \
+                        time.time() > self._presched["t_local"] + 8:
+                    self._presched = None
                 if status_name in ("playing", "paused"):
                     if not self._playlist_active:
                         LOG.info("fppd %s — reconciling into active state",
@@ -1153,6 +1265,8 @@ class FalconBeatDaemon:
                             and self._current_source:
                         # sequence-only entry on air — park listeners
                         self.pause()
+                    if status_name == "playing" and song:
+                        self._maybe_preschedule(st)
                 elif status_name in ("idle", "stopping"):
                     if self._playlist_active or self._current_source:
                         LOG.info("fppd %s — reconciling to stopped",
@@ -1317,14 +1431,17 @@ class FalconBeatDaemon:
                     self._registered.add(url)
         return url
 
-    def play(self, media_name, data=None):
+    def play(self, media_name, data=None, event_ts=None):
         with self._pb_lock:
-            self._play(media_name, data)
+            self._play(media_name, data, event_ts)
 
-    def _play(self, media_name, data=None):
+    def _play(self, media_name, data=None, event_ts=None):
         if media_name == self._current_media:
             return
         self._playlist_active = True
+        self._tick.set()  # reconcile may be parked in an idle wait
+        presched = self._presched
+        self._presched = None  # any real event supersedes a pending schedule
         # Push now-playing first — the page can show the track even while
         # devices are still loading the audio.
         doc = {
@@ -1340,36 +1457,62 @@ class FalconBeatDaemon:
 
         session = self._connect()
         url = self.ensure_source(media_name)
-        delay = session.expected_delay_s()
         pos, _playing = fpp_position_seconds()
-        offset = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
-        # Devices execute PLAY delay-s from now, landing at track position
-        # `target` — self-correcting since pos is sampled live, so a device
-        # that joins a beat late is still on the right note, just quieter
-        # for the missed intro. syncOffsetMs nudges where they land.
-        target = pos + delay + offset
-        LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f + offset %.3f)",
-                 media_name, target, pos, delay, offset)
-        # Silence the previous track's tail while devices load the new one.
+        t_sample = time.time()
+        t_ev = event_ts or t_sample
+        off = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
+        delay = session.expected_delay_s()
+        # T2 = the instant devices start. When the server honors
+        # executeAtServerTime we anchor to the media callback itself:
+        # fppd fires it inside PreparePlay, ~PREP_DELAY_S before audio
+        # actually starts, so T2 lands just after the track begins. The
+        # position sent is always extrapolated to T2, so residual error is
+        # only the status read's staleness — systematic, tunable with
+        # Sync Offset. On unpatched servers T2 = now + the server's own
+        # predicted delay, which behaves exactly as before.
+        probe = 0.077 if session.execat_supported is None else 0.0
+        if session.execat_supported is not False:
+            t2_local = max(t_ev + self.PREP_DELAY_S + off + probe,
+                           t_sample + 0.05)
+        else:
+            t2_local = t_sample + delay + off
+        target = pos + (t2_local - t_sample)
+        exec_at = session.server_now_ms() + (t2_local - time.time()) * 1000.0
+        LOG.info("PLAY %s @ %.2fs (pos %.2f -> T+%.2f%s, offset %.3f)",
+                 media_name, target, pos, t2_local - t_ev,
+                 "" if session.execat_supported is not False else
+                 " server-picked", off)
+        # A still-pending pre-schedule gets killed outright — the client
+        # would supersede it at T2 anyway, but for a mid-list skip T2 can
+        # land after its armed start and leave an audible blip.
+        if presched and presched["url"] != url and \
+                presched["t_local"] > time.time():
+            try:
+                session.send_pause(
+                    presched["url"], 0.0,
+                    session.server_now_ms() + delay * 1000.0)
+            except Exception as e:
+                LOG.warning("cancel of pre-scheduled PLAY failed: %s", e)
+        # Cut the previous track at the same instant the new one starts.
         old_source = self._current_source
         if old_source and old_source != url:
             try:
-                session.send_command(
-                    {
-                        "type": "PAUSE",
-                        "audioSource": old_source,
-                        "trackTimeSeconds": 0.0,
-                    }
-                )
+                session.send_pause(old_source, 0.0, exec_at)
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
-        _t = time.monotonic()
-        echo = session.send_command(
-            {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
-        )
-        LOG.info("[dbg] PLAY->echo %.2fs", time.monotonic() - _t)
+        echo = session.send_play(url, target, exec_at)
         self._current_source = url
         self._current_media = media_name
+        self._last_play = {
+            "media": media_name, "url": url, "t2": t2_local,
+            "target": target, "off": off,
+        }
+        # Post-hoc check: ~0.9s later, compare where devices were told to
+        # be against where fppd actually is; correct large misses once.
+        vt = threading.Timer(
+            self.VERIFY_DELAY_S, self._verify_start, args=(media_name,))
+        vt.daemon = True
+        vt.start()
         # Advance the playlist cursor: first matching entry strictly after
         # the previous position (handles repeats and mid-list skips). If it
         # only exists behind us the playlist looped — take the first match.
@@ -1413,25 +1556,77 @@ class FalconBeatDaemon:
         LOG.info("PLAY confirmed, executes at server ts %s",
                  echo.get("serverTimeToExecute"))
 
+    # -- start-time verification -------------------------------------------
+    # The PLAY is sent with an extrapolated position; ~0.9s later we check
+    # where devices were told to be vs where fppd actually is. Error =
+    # status-read staleness + anchor bias — a large miss means our estimate
+    # was off enough to hear, so send ONE corrective pos-anchored PLAY and
+    # log a Sync Offset hint.
+
+    def _verify_start(self, media_name):
+        lp = self._last_play
+        if not lp or lp["media"] != media_name:
+            return
+        if self._current_media != media_name:
+            return
+        with self._session_lock:
+            session = self.session
+        if session is None or not session._connected.is_set():
+            return
+        pos2, playing = fpp_position_seconds()
+        now = time.time()
+        # Where devices are, extrapolated: pos at T2 + elapsed since T2.
+        device_pos = lp["target"] + (now - lp["t2"])
+        err = device_pos - pos2  # >0: devices ahead of fppd
+        if not playing:
+            return
+        if abs(err) <= self.VERIFY_ERR_S:
+            LOG.info("start verified: devices %+dms vs fppd", int(err * 1000))
+            return
+        delay = session.expected_delay_s()
+        target2 = pos2 + delay + lp["off"]
+        try:
+            session.send_play(
+                lp["url"], target2,
+                session.server_now_ms() + delay * 1000.0)
+            LOG.warning(
+                "start was off by %+dms — sent corrective PLAY "
+                "(if every song drifts the same way, adjust Sync Offset "
+                "by %+dms)", int(err * 1000), int(err * 1000))
+        except Exception as e:
+            LOG.warning("verify correction failed: %s", e)
+
     def pause(self):
         with self._pb_lock:
             self._pause()
 
     def _pause(self):
+        presched = self._presched
+        self._presched = None
         with self._session_lock:
             session = self.session
-        if session is None or self._current_source is None:
+        if session is None:
+            return
+        if presched and presched["t_local"] > time.time():
+            # A pre-scheduled PLAY is pending on devices — land a PAUSE
+            # just before its start time so the pending node is silenced
+            # instead of firing into the stop/gap.
+            try:
+                session.send_pause(
+                    presched["url"], 0.0,
+                    session.server_now_ms()
+                    + (presched["t_local"] - time.time() - 0.05) * 1000.0)
+            except Exception as e:
+                LOG.warning("cancel of pre-scheduled PLAY failed: %s", e)
+        if self._current_source is None:
             return
         pos, _playing = fpp_position_seconds()
-        target = pos + session.expected_delay_s()
+        delay = session.expected_delay_s()
+        target = pos + delay
         try:
-            session.send_command(
-                {
-                    "type": "PAUSE",
-                    "audioSource": self._current_source,
-                    "trackTimeSeconds": max(0.0, target),
-                }
-            )
+            session.send_pause(
+                self._current_source, max(0.0, target),
+                session.server_now_ms() + delay * 1000.0)
             LOG.info("PAUSE %s @ %.2fs", self._current_source, target)
         except Exception as e:
             LOG.warning("PAUSE failed: %s", e)
@@ -1455,7 +1650,7 @@ class FalconBeatDaemon:
             if cb_type == "playlist":
                 return self._on_playlist(data)
             elif cb_type == "media":
-                return self._on_media(data)
+                return self._on_media(data, event_ts=ev.get("ts"))
             return True
         except Exception as e:
             LOG.exception("event %s failed: %s", cb_type, e)
@@ -1478,6 +1673,7 @@ class FalconBeatDaemon:
         if action == "start":
             LOG.info("playlist start")
             self._playlist_active = True
+            self._tick.set()  # reconcile onto the fast cadence now
             self._queue_fetch_fail.clear()  # fresh playlist — retry the fetch
             if self._disconnect_timer:
                 self._disconnect_timer.cancel()
@@ -1510,6 +1706,7 @@ class FalconBeatDaemon:
             # query_next is FPP's next-item hook. Neither ends playback.
             LOG.info("playlist %s", action)
             self._playlist_active = True
+            self._tick.set()
             if action == "query_next":
                 # Fired when the current entry finishes, Item = its index
                 # within Section (an int, not the entry dict). The queue is
@@ -1672,16 +1869,16 @@ class FalconBeatDaemon:
                 LOG.warning("lookahead push %s failed: %s",
                             self._queue[nxt], e)
 
-    def _on_media(self, data):
+    def _on_media(self, data, event_ts=None):
         entry_type = str(data.get("type", "")).lower()
         media_name = data.get("Media") or ""
         if entry_type in ("both", "media", "video") and media_name:
             # fresh media -> any pending disconnect is moot while a playlist runs
             try:
                 # The callback already returned — fppd is playing. Devices
-                # join at the computed track position (late by the schedule
-                # delay, but on the right note).
-                self.play(media_name, data)
+                # get an absolute start instant anchored to the event, with
+                # the position extrapolated to it.
+                self.play(media_name, data, event_ts=event_ts)
                 self._recovered("play", "playback recovered")
                 return True
             except Exception as e:
@@ -1689,9 +1886,10 @@ class FalconBeatDaemon:
                 LOG.debug("PLAY %s traceback:", media_name, exc_info=True)
                 return False
         elif entry_type in ("pause", "sequence", "event"):
-            # non-audio playlist entry: park listeners
-            if self._current_source:
-                self.pause()
+            # non-audio playlist entry: park listeners. _pause also drops a
+            # pending pre-schedule — it must see _presched, so don't clear
+            # it here first.
+            self.pause()
         return True
 
     # -- control socket ---------------------------------------------------

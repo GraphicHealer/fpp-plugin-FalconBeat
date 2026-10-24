@@ -175,8 +175,11 @@ def main(argv):
         # Fire and forget — fppd waitpid()s on this script on its main loop,
         # so the event is handed off and we exit. The daemon PLAYs devices at
         # the right track offset; they join a schedule-delay late but synced.
+        # ts = when fppd dispatched the callback — the daemon anchors the
+        # device's scheduled start instant to it.
         try:
-            send_to_daemon({"cb_type": cb_type, "data": data})
+            send_to_daemon(
+                {"cb_type": cb_type, "data": data, "ts": time.time()})
         except OSError as e:
             log("failed to forward %s event: %s" % (cb_type, e))
             return 1
