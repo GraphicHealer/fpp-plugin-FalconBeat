@@ -73,24 +73,31 @@ writes — never a query string (proxy access logs would capture it).
   extrapolates the sampled FPP position to the execute instant and adds
   `syncOffsetMs` (the user-facing tune knob).
 - Anchored transitions (patched server): media event T2 = callback ts +
-  PREP_DELAY_S (fppd fires media callbacks in PreparePlay, ~0.45s before
-  audio) — devices start from pos~0 at one anchored instant, same bias
-  every song, tunable. Pre-schedule: while `seconds_remaining` ≤
-  PRE_SCHEDULE_AHEAD_S (4.5s, > the server's 3s load window) the
-  reconciler broadcasts the NEXT track's PLAY early (executeAt =
-  transition + SCHEDULE_GAP_S). When the media event then arrives, the
-  armed instant STANDS — `seconds_remaining` is a better boundary
-  estimate than callback + PREP_DELAY (PreparePlay can fire well ahead
-  of the real transition; anchoring to it cut the outgoing tail and
-  made the verify pass rewind the head audibly). Fallback when no
-  pre-schedule exists: the callback-anchored path. On stop/pause the
-  daemon PAUSEs the pending source just before its armed start so a
-  stale schedule never fires into the gap. ~0.9s after each PLAY (and
-  re-armed ~0.5s after a kept pre-schedule fires) a verify pass
-  compares device-vs-fppd position; a >0.3s miss sends ONE corrective
-  pos-anchored PLAY. Old server: every PLAY is `pos + predicted delay`
-  at `now + delay` — devices land a schedule-delay late but on the right
-  beat; no gating of FPP, ever.
+  PREP_DELAY_S (fppd fires media callbacks in PreparePlay, before the
+  audio pipeline starts — "most of a second on slow boards" per fppd
+  src) — devices start from pos~0 at one anchored instant, same bias
+  every song, tunable. Pre-schedule: near the entry's end the reconciler
+  broadcasts the NEXT track's PLAY early. Remaining time is computed
+  precisely — fppd's `seconds_remaining`/`seconds_played` are int-
+  truncated (up to ~1s low), so the daemon uses `milliseconds_elapsed`
+  plus durations from `/api/media/<name>/duration` and
+  `/api/sequence/<name>/meta` (entry end = min(media, seq) — fppd's
+  GetLengthInMS for "both" entries). The armed instant = entry end +
+  `_extra_gap` (learned boundary→audio-start delay, converged by the
+  verify pass, seeded 0.45s) + SCHEDULE_GAP_S, with pos0 placed at
+  entry-end + `_extra_gap` — the real audio start, not the silent
+  boundary. When the media event then arrives, the armed instant STANDS
+  (PreparePlay can fire well ahead of the real transition; anchoring to
+  it cut the outgoing tail and made the verify pass rewind the head
+  audibly). Fallback when no pre-schedule exists: the callback-anchored
+  path. On stop/pause the daemon PAUSEs the pending source just before
+  its armed start so a stale schedule never fires into the gap. ~0.9s
+  after each PLAY (and re-armed ~0.5s after a kept pre-schedule fires) a
+  verify pass compares device-vs-fppd position (`milliseconds_elapsed`);
+  a >0.3s miss sends ONE corrective pos-anchored PLAY — and for armed
+  starts the error also refines `_extra_gap`. Old server: every PLAY is
+  `pos + predicted delay` at `now + delay` — devices land a
+  schedule-delay late but on the right beat; no gating of FPP, ever.
 - Server load-coordination clock starts at PLAY: it waits ≤3s for client
   AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Devices fetch audio
   over WAN — a freshly registered URL may not fit in 3s → they SYNC in

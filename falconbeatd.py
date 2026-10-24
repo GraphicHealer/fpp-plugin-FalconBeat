@@ -822,6 +822,14 @@ def fpp_position_seconds():
     """Current media position from the FPP status API. Returns (seconds, playing)."""
     st = fpp_status() or {}
     playing = st.get("status_name") == "playing" or st.get("status") == 1
+    ms = st.get("milliseconds_elapsed")
+    if ms is not None:
+        try:
+            return float(ms) / 1000.0, bool(playing)
+        except (TypeError, ValueError):
+            pass
+    # Fallback: seconds_played is integer-truncated (0-1s low) — only
+    # reached on FPP builds without milliseconds_elapsed.
     raw = st.get("seconds_played", 0)
     try:
         pos = float(raw)
@@ -833,6 +841,30 @@ def fpp_position_seconds():
         except Exception:
             pos = 0.0
     return pos, bool(playing)
+
+
+def fpp_media_duration_seconds(name):
+    """Precise media duration (seconds) from the FPP media API, or None."""
+    url = "http://127.0.0.1/api/media/%s/duration" % urllib.parse.quote(str(name))
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            dur = float(json.loads(r.read()).get("duration"))
+        return dur if dur > 0 else None
+    except Exception:
+        return None
+
+
+def fpp_sequence_duration_seconds(name):
+    """fseq duration (StepTime * NumFrames) via the sequence meta API, or None."""
+    url = "http://127.0.0.1/api/sequence/%s/meta" % urllib.parse.quote(str(name))
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            meta = json.loads(r.read())
+        dur = float(meta.get("StepTime") or 0) * \
+            float(meta.get("NumFrames") or 0) / 1000.0
+        return dur if dur > 0 else None
+    except Exception:
+        return None
 
 
 def playlist_media_files(playlist):
@@ -917,6 +949,13 @@ class FalconBeatDaemon:
         self._failed_media = {}  # filename -> epoch of last failed lookup
         self._pb_lock = threading.Lock()  # serialize play()/pause()
         self._presched = None   # {media, url, t_local} pending pre-schedule
+        self._dur_cache = {}    # media name -> duration seconds (API-cached)
+        self._seq_dur_cache = {}  # sequence name -> duration seconds
+        # Learned entry-boundary -> next-audio-start delay. fppd ends an
+        # entry at min(media, seq) length, then the next entry's
+        # OpenMediaOutput + output-pipeline start run before audio is
+        # audible. The verify pass converges this to the real value.
+        self._extra_gap = self.PREP_DELAY_S
         self._tick = threading.Event()  # wake reconciler onto fast cadence
         self._last_play = None  # last PLAY sent, for the verify pass
         self._outages = set()   # log-once keys for down-server warnings
@@ -1136,13 +1175,50 @@ class FalconBeatDaemon:
     # (supersede is free client-side). This is insurance: it only matters
     # when the callback arrives late or the device set is slow to ACK.
 
+    def _entry_remaining_seconds(self, st):
+        """Precise seconds until the current entry ends, or None.
+
+        fppd's seconds_remaining is (lengthMS - elapsedMS)/1000 int-
+        truncated — up to ~1s low, which biases an armed start early.
+        Reconstruct it exactly: milliseconds_elapsed is the media clock
+        in ms and the entry length is min(media, sequence) duration —
+        fppd's GetLengthInMS for "both" entries — both available via
+        localhost APIs."""
+        song = st.get("current_song")
+        ms = st.get("milliseconds_elapsed")
+        if not song or ms is None:
+            return None
+        try:
+            elapsed = float(ms) / 1000.0
+        except (TypeError, ValueError):
+            return None
+        dur = self._dur_cache.get(song)
+        if dur is None:
+            dur = fpp_media_duration_seconds(song)
+            if dur:
+                self._dur_cache[song] = dur
+        if not dur:
+            return None
+        seq = st.get("current_sequence")
+        if seq:
+            sdur = self._seq_dur_cache.get(seq)
+            if sdur is None:
+                sdur = fpp_sequence_duration_seconds(seq)
+                if sdur:
+                    self._seq_dur_cache[seq] = sdur
+            if sdur and sdur < dur:
+                dur = sdur
+        return dur - elapsed
+
     def _maybe_preschedule(self, st):
         if self._presched is not None:
             return
-        try:
-            rem = float(st.get("seconds_remaining") or 0)
-        except (TypeError, ValueError):
-            return
+        rem = self._entry_remaining_seconds(st)
+        if rem is None:
+            try:
+                rem = float(st.get("seconds_remaining") or 0)
+            except (TypeError, ValueError):
+                return
         if not (0 < rem <= self.PRE_SCHEDULE_AHEAD_S):
             return
         nxt_i = self._queue_next_idx()
@@ -1155,10 +1231,15 @@ class FalconBeatDaemon:
         try:
             url = self.ensure_source(name)
             session = self._connect()
-            t1_local = time.time() + rem + self.SCHEDULE_GAP_S + off
-            # Position at T1 ≈ the gap estimate: if T1 lands exactly on the
-            # real transition devices start at ~0; error is bounded by the
-            # gap mis-estimate, and the refine supersedes it anyway.
+            # T1 = predicted entry end + learned boundary->audio gap + a
+            # small buffer. The armed node starts at T1 already pos_at
+            # seconds into the track, so its position-0 lands at
+            # (entry end + _extra_gap) — the instant the next track's
+            # audio actually starts, not the silent entry boundary
+            # itself (fppd spends _extra_gap on the next entry's
+            # OpenMediaOutput + output-pipeline start).
+            t1_local = (time.time() + rem + self._extra_gap
+                        + self.SCHEDULE_GAP_S + off)
             pos_at = self.SCHEDULE_GAP_S + off
             session.send_play(
                 url, max(0.0, pos_at),
@@ -1475,11 +1556,12 @@ class FalconBeatDaemon:
         # predicted delay, which behaves exactly as before.
         old_source = self._current_source
         # A pre-schedule armed for THIS media already carries the handoff —
-        # its instant came from seconds_remaining, which is a better
-        # boundary estimate than callback + PREP_DELAY. PreparePlay can fire
-        # this callback well ahead of the real transition, and anchoring T2
-        # to it cuts the outgoing tail early and makes _verify_start rewind
-        # the head audibly. Keep the armed PLAY instead.
+        # its instant came from the duration-derived entry boundary plus
+        # the learned gap, a better estimate than callback + PREP_DELAY.
+        # PreparePlay can fire this callback well ahead of the real
+        # transition, and anchoring T2 to it cuts the outgoing tail early
+        # and makes _verify_start rewind the head audibly. Keep the armed
+        # PLAY instead.
         armed = presched and presched["media"] == media_name and \
             presched["t_local"] > t_sample + 0.05
         if armed:
@@ -1492,7 +1574,7 @@ class FalconBeatDaemon:
             self._current_media = media_name
             self._last_play = {
                 "media": media_name, "url": url, "t2": t2_local,
-                "target": target, "off": off,
+                "target": target, "off": off, "armed": True,
             }
         else:
             probe = 0.077 if session.execat_supported is None else 0.0
@@ -1618,6 +1700,14 @@ class FalconBeatDaemon:
         if abs(err) <= self.VERIFY_ERR_S:
             LOG.info("start verified: devices %+dms vs fppd", int(err * 1000))
             return
+        if lp.get("armed"):
+            # Armed math cancels syncOffset: err = real entry-end ->
+            # audio-start gap minus our estimate. Converge halfway so
+            # subsequent pre-scheduled starts land closer.
+            self._extra_gap = min(2.5, max(
+                0.0, self._extra_gap + err * 0.5))
+            LOG.info("boundary->audio gap estimate now %.2fs",
+                     self._extra_gap)
         delay = session.expected_delay_s()
         target2 = pos2 + delay + lp["off"]
         try:
