@@ -1473,6 +1473,7 @@ class FalconBeatDaemon:
         # only the status read's staleness — systematic, tunable with
         # Sync Offset. On unpatched servers T2 = now + the server's own
         # predicted delay, which behaves exactly as before.
+        old_source = self._current_source
         # A pre-schedule armed for THIS media already carries the handoff —
         # its instant came from seconds_remaining, which is a better
         # boundary estimate than callback + PREP_DELAY. PreparePlay can fire
@@ -1483,7 +1484,8 @@ class FalconBeatDaemon:
             presched["t_local"] > t_sample + 0.05
         if armed:
             t2_local = presched["t_local"]
-            target = self.SCHEDULE_GAP_S + off  # the armed PLAY's pos_at
+            # Matches the pos_at the armed PLAY actually carried.
+            target = max(0.0, self.SCHEDULE_GAP_S + off)
             LOG.info("PLAY %s: pre-scheduled start stands (fires in %.2fs)",
                      media_name, t2_local - t_sample)
             self._current_source = url
@@ -1517,7 +1519,6 @@ class FalconBeatDaemon:
                 except Exception as e:
                     LOG.warning("cancel of pre-scheduled PLAY failed: %s", e)
             # Cut the previous track at the same instant the new one starts.
-            old_source = self._current_source
             if old_source and old_source != url:
                 try:
                     session.send_pause(old_source, 0.0, exec_at)
@@ -1576,8 +1577,9 @@ class FalconBeatDaemon:
         self._played_urls = set()
         if stale:
             self._delete_room_sources(sorted(stale), reason="played/skipped")
-        LOG.info("PLAY confirmed, executes at server ts %s",
-                 echo.get("serverTimeToExecute"))
+        if not armed:
+            LOG.info("PLAY confirmed, executes at server ts %s",
+                     echo.get("serverTimeToExecute"))
 
     # -- start-time verification -------------------------------------------
     # The PLAY is sent with an extrapolated position; ~0.9s later we check
