@@ -78,11 +78,15 @@ writes — never a query string (proxy access logs would capture it).
   every song, tunable. Pre-schedule: while `seconds_remaining` ≤
   PRE_SCHEDULE_AHEAD_S (4.5s, > the server's 3s load window) the
   reconciler broadcasts the NEXT track's PLAY early (executeAt =
-  transition + SCHEDULE_GAP_S) — insurance for late callbacks; the real
-  media event then refines it (a newer PLAY supersedes the pending node
-  client-side); on stop/pause the daemon PAUSEs the pending source just
-  before its armed start so a stale schedule never fires into the gap.
-  ~0.9s after each PLAY a verify pass
+  transition + SCHEDULE_GAP_S). When the media event then arrives, the
+  armed instant STANDS — `seconds_remaining` is a better boundary
+  estimate than callback + PREP_DELAY (PreparePlay can fire well ahead
+  of the real transition; anchoring to it cut the outgoing tail and
+  made the verify pass rewind the head audibly). Fallback when no
+  pre-schedule exists: the callback-anchored path. On stop/pause the
+  daemon PAUSEs the pending source just before its armed start so a
+  stale schedule never fires into the gap. ~0.9s after each PLAY (and
+  re-armed ~0.5s after a kept pre-schedule fires) a verify pass
   compares device-vs-fppd position; a >0.3s miss sends ONE corrective
   pos-anchored PLAY. Old server: every PLAY is `pos + predicted delay`
   at `now + delay` — devices land a schedule-delay late but on the right

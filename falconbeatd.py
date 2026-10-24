@@ -1464,51 +1464,72 @@ class FalconBeatDaemon:
         t_ev = event_ts or t_sample
         off = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
         delay = session.expected_delay_s()
-        # T2 = the instant devices start. When the server honors
-        # executeAtServerTime we anchor to the media callback itself:
+        # T2 = the instant devices start. When a pre-schedule is armed for
+        # this media its instant stands — see below. Otherwise, with
+        # executeAtServerTime honored we anchor to the media callback:
         # fppd fires it inside PreparePlay, ~PREP_DELAY_S before audio
         # actually starts, so T2 lands just after the track begins. The
         # position sent is always extrapolated to T2, so residual error is
         # only the status read's staleness — systematic, tunable with
         # Sync Offset. On unpatched servers T2 = now + the server's own
         # predicted delay, which behaves exactly as before.
-        probe = 0.077 if session.execat_supported is None else 0.0
-        if session.execat_supported is not False:
-            t2_local = max(t_ev + self.PREP_DELAY_S + off + probe,
-                           t_sample + 0.05)
+        # A pre-schedule armed for THIS media already carries the handoff —
+        # its instant came from seconds_remaining, which is a better
+        # boundary estimate than callback + PREP_DELAY. PreparePlay can fire
+        # this callback well ahead of the real transition, and anchoring T2
+        # to it cuts the outgoing tail early and makes _verify_start rewind
+        # the head audibly. Keep the armed PLAY instead.
+        armed = presched and presched["media"] == media_name and \
+            presched["t_local"] > t_sample + 0.05
+        if armed:
+            t2_local = presched["t_local"]
+            target = self.SCHEDULE_GAP_S + off  # the armed PLAY's pos_at
+            LOG.info("PLAY %s: pre-scheduled start stands (fires in %.2fs)",
+                     media_name, t2_local - t_sample)
+            self._current_source = url
+            self._current_media = media_name
+            self._last_play = {
+                "media": media_name, "url": url, "t2": t2_local,
+                "target": target, "off": off,
+            }
         else:
-            t2_local = t_sample + delay + off
-        target = pos + (t2_local - t_sample)
-        exec_at = session.server_now_ms() + (t2_local - time.time()) * 1000.0
-        LOG.info("PLAY %s @ %.2fs (pos %.2f -> T+%.2f%s, offset %.3f)",
-                 media_name, target, pos, t2_local - t_ev,
-                 "" if session.execat_supported is not False else
-                 " server-picked", off)
-        # A still-pending pre-schedule gets killed outright — the client
-        # would supersede it at T2 anyway, but for a mid-list skip T2 can
-        # land after its armed start and leave an audible blip.
-        if presched and presched["url"] != url and \
-                presched["t_local"] > time.time():
-            try:
-                session.send_pause(
-                    presched["url"], 0.0,
-                    session.server_now_ms() + delay * 1000.0)
-            except Exception as e:
-                LOG.warning("cancel of pre-scheduled PLAY failed: %s", e)
-        # Cut the previous track at the same instant the new one starts.
-        old_source = self._current_source
-        if old_source and old_source != url:
-            try:
-                session.send_pause(old_source, 0.0, exec_at)
-            except Exception as e:
-                LOG.warning("pre-play PAUSE of old source failed: %s", e)
-        echo = session.send_play(url, target, exec_at)
-        self._current_source = url
-        self._current_media = media_name
-        self._last_play = {
-            "media": media_name, "url": url, "t2": t2_local,
-            "target": target, "off": off,
-        }
+            probe = 0.077 if session.execat_supported is None else 0.0
+            if session.execat_supported is not False:
+                t2_local = max(t_ev + self.PREP_DELAY_S + off + probe,
+                               t_sample + 0.05)
+            else:
+                t2_local = t_sample + delay + off
+            target = pos + (t2_local - t_sample)
+            exec_at = session.server_now_ms() + (t2_local - time.time()) * 1000.0
+            LOG.info("PLAY %s @ %.2fs (pos %.2f -> T+%.2f%s, offset %.3f)",
+                     media_name, target, pos, t2_local - t_ev,
+                     "" if session.execat_supported is not False else
+                     " server-picked", off)
+            # A still-pending pre-schedule gets killed outright — the client
+            # would supersede it at T2 anyway, but for a mid-list skip T2 can
+            # land after its armed start and leave an audible blip.
+            if presched and presched["url"] != url and \
+                    presched["t_local"] > time.time():
+                try:
+                    session.send_pause(
+                        presched["url"], 0.0,
+                        session.server_now_ms() + delay * 1000.0)
+                except Exception as e:
+                    LOG.warning("cancel of pre-scheduled PLAY failed: %s", e)
+            # Cut the previous track at the same instant the new one starts.
+            old_source = self._current_source
+            if old_source and old_source != url:
+                try:
+                    session.send_pause(old_source, 0.0, exec_at)
+                except Exception as e:
+                    LOG.warning("pre-play PAUSE of old source failed: %s", e)
+            echo = session.send_play(url, target, exec_at)
+            self._current_source = url
+            self._current_media = media_name
+            self._last_play = {
+                "media": media_name, "url": url, "t2": t2_local,
+                "target": target, "off": off,
+            }
         # Post-hoc check: ~0.9s later, compare where devices were told to
         # be against where fppd actually is; correct large misses once.
         vt = threading.Timer(
@@ -1577,6 +1598,16 @@ class FalconBeatDaemon:
             return
         pos2, playing = fpp_position_seconds()
         now = time.time()
+        if lp["t2"] > now:
+            # A kept pre-scheduled start hasn't fired yet — nothing to
+            # verify until it does; check again just after.
+            delay = lp["t2"] - now + 0.5
+            if delay <= 6.0:
+                vt = threading.Timer(
+                    delay, self._verify_start, args=(media_name,))
+                vt.daemon = True
+                vt.start()
+            return
         # Where devices are, extrapolated: pos at T2 + elapsed since T2.
         device_pos = lp["target"] + (now - lp["t2"])
         err = device_pos - pos2  # >0: devices ahead of fppd
