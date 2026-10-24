@@ -15,10 +15,11 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
   track during the previous song instead of the whole show at once. On a
   repeating playlist the window wraps — while the last song plays, the
   first song is already back in the room as "next".
-- Each track start can be held until the server accepts the play command
-  (the Sync Gate — devices that haven't finished downloading sync in at
-  the right offset). FPP and the devices then start at the same scheduled
-  instant; pauses and stops send PAUSE.
+- Playback events are fire-and-forget — FPP's timing is never held up.
+  Devices execute each play on the server's synchronized clock at the
+  computed track offset: a listener that starts a beat late still lands
+  on the right note. Video entries upload their extracted soundtrack,
+  not the whole video. Pauses and stops send PAUSE.
 - Played or skipped tracks are evicted from the room and deleted from
   ingest. `nowplaying.json` (heartbeated while playing) drives the listener
   page's title/artist and off-air banner; the status page shows the live
@@ -26,16 +27,19 @@ the [FalconBeat](https://github.com/GraphicHealer/FalconBeat) stack.
 
 ## Configure
 
-Input/Output Setup &rarr; FalconBeat. Four fields are all it needs:
+Input/Output Setup &rarr; FalconBeat. Enable it, then three fields:
 
 - **Server (LAN)** — `falconbeat.local` or `host:port`; one published port
   carries everything.
 - **Server Token** — the `FALCONBEAT_TOKEN` from your server.
-- **Sync Offset** — nudge device start timing against FPP's media-start
-  latency. Raise it if the audio runs ahead of the lights.
+- **Sync Offset** — shifts where devices join the track. Raise it if the
+  audio trails the lights, lower it if it runs ahead.
 
-Advanced and Developer groups appear when you raise FPP's UI level.
+An Advanced group appears when you raise FPP's UI level.
 Status &rarr; FalconBeat Status shows the live connection state.
+
+Want a gap between songs so devices can settle? Add a Pause entry to the
+playlist — FPP handles it natively.
 
 **Show Info** (same page): name, tagline, hosted-by, schedule, location,
 description, links (`Label = URL`, one per line), and your public listener

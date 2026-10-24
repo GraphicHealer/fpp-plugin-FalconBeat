@@ -15,7 +15,7 @@
         "sends": [
             {
                 "to": "the FalconBeat server you configure",
-                "what": "show audio files, playback commands, server token, now-playing metadata, and the show info you configure (name, tagline, host, schedule, location, description, links, public listener URL)",
+                "what": "audio files (incl. video soundtracks), playback commands, show info, server token",
                 "why": "to let visitors' devices play the show audio in sync with the lights",
                 "alwaysOn": false
             }
@@ -30,7 +30,7 @@
             },
             {
                 "kind": "network",
-                "what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) â€” not reachable off-host"
+                "what": "daemon control channel is a unix-domain socket under plugindata (loopback TCP fallback on non-Linux dev hosts) - not reachable off-host"
             },
             {
                 "kind": "core-settings",
@@ -38,7 +38,7 @@
             }
         ],
         "closedCode": false,
-        "other": "Secrets are stored mode-0600 under plugindata, outside the shared config directory; the daemon listens only on a local unix socket."
+        "other": "Secrets are stored mode-0600 under plugindata, outside the shared config directory; the daemon listens only on a local unix socket. Show info is the name/tagline/host/schedule/location/description/links/public URL you configure; blank name and tagline fall back to FPP's HostName and HostDescription."
     },
     "versions": [
         {

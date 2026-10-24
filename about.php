@@ -13,9 +13,13 @@ server.
 track's upload + registration happens during the previous song, so devices
 download it early — a skipped or finished track leaves the room (and the
 server's media dir) right away.</li>
-<li>When each media entry starts, FPP's start is held briefly while devices
-confirm the audio is loaded, then devices and FPP start position 0 at the
-same scheduled instant — a short, intentional gap between tracks.</li>
+<li>Playback events are forwarded and released instantly — FPP's timing is
+never held up. Devices execute each play on the server's synchronized clock
+at the computed track offset, so a listener that starts a beat late still
+lands on the right note. Video entries upload their extracted soundtrack,
+not the video file.</li>
+<li>Want a breather between songs so devices can settle? Add a Pause entry
+to the playlist — FPP handles it natively.</li>
 <li>Pause-type entries, playlist pauses and stops send PAUSE.</li>
 <li>A short-lived admin connection per playlist keeps the room alive; it drops
 a few seconds after the playlist ends.</li>

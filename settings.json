@@ -26,14 +26,6 @@
             "description": "Advanced",
             "level": 1,
             "settings": [
-                "gateMaxSec",
-                "preloadSettleMs"
-            ]
-        },
-        "FalconBeatDeveloper": {
-            "description": "Developer",
-            "level": 3,
-            "settings": [
                 "nudgeMs",
                 "disconnectGraceSec"
             ]
@@ -50,7 +42,7 @@
             "type": "checkbox",
             "checkedValue": "1",
             "uncheckedValue": "0",
-            "default": "1"
+            "default": "0"
         },
         "serverAddr": {
             "name": "serverAddr",
@@ -152,43 +144,15 @@
         "syncOffsetMs": {
             "name": "syncOffsetMs",
             "description": "Sync Offset",
-            "tip": "Raise it if the audio runs ahead of the lights, lower it if the audio trails.",
+            "tip": "Shifts where devices join the track — raise it if the audio trails the lights, lower it if it runs ahead.",
             "restart": 0,
             "reboot": 0,
             "level": 0,
             "type": "number",
-            "min": 0,
-            "max": 5000,
+            "min": -1000,
+            "max": 3000,
             "step": 10,
-            "default": "250",
-            "suffix": "ms"
-        },
-        "gateMaxSec": {
-            "name": "gateMaxSec",
-            "description": "Sync Gate",
-            "tip": "Hold each track's start until devices confirm loaded. 0 = off.",
-            "restart": 0,
-            "reboot": 0,
-            "level": 1,
-            "type": "number",
-            "min": 0,
-            "max": 60,
-            "step": 1,
-            "default": "10",
-            "suffix": "s"
-        },
-        "preloadSettleMs": {
-            "name": "preloadSettleMs",
-            "description": "Preload Settle",
-            "tip": "Wait after a fresh upload before PLAY so devices can download. 0 = off.",
-            "restart": 0,
-            "reboot": 0,
-            "level": 1,
-            "type": "number",
-            "min": 0,
-            "max": 30000,
-            "step": 100,
-            "default": "2500",
+            "default": "0",
             "suffix": "ms"
         },
         "nudgeMs": {
@@ -197,7 +161,7 @@
             "tip": "Added to the computed device delay. 0 = auto.",
             "restart": 0,
             "reboot": 0,
-            "level": 3,
+            "level": 1,
             "type": "number",
             "min": -1000,
             "max": 5000,
@@ -211,7 +175,7 @@
             "tip": "Seconds the admin socket is held after playlist stop.",
             "restart": 0,
             "reboot": 0,
-            "level": 3,
+            "level": 1,
             "type": "number",
             "min": 0,
             "max": 600,

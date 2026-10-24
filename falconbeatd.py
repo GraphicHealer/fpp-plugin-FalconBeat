@@ -4,9 +4,10 @@ FalconBeat daemon — keeps FPP playback mirrored to a FalconBeat room.
 
 Run by FPP (postStart.sh / lifecycle callback). Speaks:
 
-  - FalconBeat admin WS (ws://<server>/ws?roomId=..&creator=..) — held open
-    for the duration of a playlist so the room (deleted after 60s idle)
-    stays alive and listeners stay attached.
+  - FalconBeat admin WS (ws://<server>/ws?roomId=.. — the shared token
+    rides the Authorization: Bearer upgrade header, not the query string)
+    held open for the duration of a playlist so the room (deleted after
+    60s idle) stays alive and listeners stay attached.
   - FalconBeat HTTP     (POST /upload/complete — Bearer-gated at the edge)
   - FalconBeat ingest  (PUT/DELETE <server>/media/<name>, PUT /config/*,
     Bearer token) — all through the one published port
@@ -21,19 +22,29 @@ shared across plugins, so we deliberately keep zero dependencies.
 """
 
 import base64
+import hashlib
 import json
 import logging
+import logging.handlers
 import os
+import re
 import select
+import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 PLUGIN_NAME = "fpp-plugin-FalconBeat"
 MEDIADIR = os.environ.get("MEDIADIR", "/home/fpp/media")
@@ -49,9 +60,11 @@ SOCK_PATH = os.path.join(
     DATADIR, "falconbeatd.sock" if HAS_UNIX else "falconbeatd.port"
 )
 PID_PATH = os.path.join(DATADIR, "falconbeatd.pid")
+LOCK_PATH = os.path.join(DATADIR, "falconbeatd.lock")
 STATE_PATH = os.path.join(DATADIR, "status.json")
 SECRETS_PATH = os.path.join(DATADIR, "secrets")
 SETTINGS_PATH = os.path.join(CFGDIR, "plugin." + PLUGIN_NAME)
+AUDIO_DIR = os.path.join(DATADIR, "audio")  # extracted video soundtracks
 FPP_STATUS_URL = "http://127.0.0.1/api/fppd/status"
 FPP_SYSINFO_URL = "http://127.0.0.1/api/system/info"
 
@@ -63,16 +76,18 @@ LOG = logging.getLogger("falconbeatd")
 # --------------------------------------------------------------------------
 
 DEFAULTS = {
-    "enabled": "1",
+    # Off until configured — a fresh install must not touch the network
+    # (PLUGIN_GUIDELINES §14.13).
+    "enabled": "0",
     # LAN address of the FalconBeat edge — one published port carries the
     # admin WS, ingest writes, and the gated HTTP endpoints. Accepts
-    # "host", "host:port", or "http(s)://host[:port]".
-    "serverAddr": "localhost",
+    # "host", "host:port", or "http(s)://host[:port]". Empty = unconfigured.
+    "serverAddr": "",
     # Fixed room — the listener page joins 000000 (its ?room= override is
     # for the server owner's own testing, not a plugin setting).
     "roomId": "000000",
-    # Shared token: ?creator= on the admin WS, Bearer on /upload/complete,
-    # and Bearer on ingest writes — the server's FALCONBEAT_TOKEN.
+    # Shared token: Authorization header on the admin WS upgrade AND Bearer
+    # on /upload/complete + ingest writes — the server's FALCONBEAT_TOKEN.
     "falconbeatToken": "",
     # Extra milliseconds added to the computed schedule delay when telling
     # devices where in the track to start. Tune if devices run audibly late.
@@ -80,26 +95,32 @@ DEFAULTS = {
     # Seconds after a playlist stop before the admin WS drops (room GC'd ~60s
     # later regardless). Small grace lets listeners see the PAUSE land.
     "disconnectGraceSec": "5",
-    # fppd blocks in the media callback inside PreparePlay — before the media
-    # output exists. The callback waits on the daemon up to this many seconds
-    # for push + register + PLAY echo, so tracks can't start before devices
-    # are ready. 0 disables gating.
-    "gateMaxSec": "10",
-    # Sync offset: milliseconds between the gate releasing and FPP's media
-    # output actually starting — the user-facing timing knob (settings page
-    # label "Sync Offset").
-    "syncOffsetMs": "250",
-    # Devices fetch audio over the public internet; when a track was just
-    # registered, the server only holds its 3s load-coordination window once
-    # PLAY is sent — a multi-MB download may not fit. On gated starts where
-    # this URL was registered during this call, wait this long before sending
-    # PLAY so the download gets a head start (FPP stays gated the whole time;
-    # the wait counts against gateMaxSec). 0 disables.
-    "preloadSettleMs": "2500",
+    # Added to the track position devices start at (the PLAY
+    # trackTimeSeconds). Positive = devices land further into the song —
+    # raise it if the audio trails the lights, lower it if it runs ahead.
+    "syncOffsetMs": "0",
 }
+
+_settings_cache = {}
+
+
+def _settings_sig():
+    sig = []
+    for p in (SETTINGS_PATH, SECRETS_PATH):
+        try:
+            st = os.stat(p)
+            sig.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append(None)
+    return tuple(sig)
 
 
 def load_settings():
+    # The reconcile loop calls this every few seconds; re-parse only when a
+    # file actually changed (mtime+size), otherwise hand back the cache.
+    sig = _settings_sig()
+    if sig == _settings_cache.get("sig") and _settings_cache.get("cfg"):
+        return dict(_settings_cache["cfg"])
     settings = dict(DEFAULTS)
     # config/plugin.* first, then plugindata/secrets (0600) on top —
     # credentials live outside config/ so backups and crash bundles
@@ -128,7 +149,19 @@ def load_settings():
     secure, hostport = _split_addr(settings.get("serverAddr", ""))
     settings["httpBase"] = ("https" if secure else "http") + "://" + hostport
     settings["wsBase"] = ("wss" if secure else "ws") + "://" + hostport
+    _settings_cache.clear()
+    _settings_cache.update({"sig": sig, "cfg": settings})
     return settings
+
+
+def configured(cfg):
+    """True only when the plugin is enabled AND has enough to reach the
+    server — until then nothing runs, polls, or sends (§14.13)."""
+    return (
+        cfg_bool(cfg.get("enabled", "0"))
+        and bool((cfg.get("serverAddr") or "").strip())
+        and bool((cfg.get("falconbeatToken") or "").strip())
+    )
 
 
 def _split_addr(addr):
@@ -158,15 +191,15 @@ class MiniWS:
     ping->pong, close. Server->client frames are unmasked; we mask ours as
     required."""
 
-    def __init__(self, url, timeout=10):
+    def __init__(self, url, timeout=10, headers=None):
         self.url = url
-        self.sock, self._recvbuf = self._handshake(url, timeout)
+        self.sock, self._recvbuf = self._handshake(url, timeout, headers)
         self._recvbuf = bytearray(self._recvbuf)
         self._send_lock = threading.Lock()
         self.sock.settimeout(None)
 
     @staticmethod
-    def _handshake(url, timeout):
+    def _handshake(url, timeout, headers=None):
         """Returns (socket, leftover bytes read past the response headers)."""
         u = urllib.parse.urlsplit(url)
         if u.scheme not in ("ws", "wss"):
@@ -184,6 +217,9 @@ class MiniWS:
             )
 
         key = base64.b64encode(os.urandom(16)).decode("ascii")
+        extra = "".join(
+            "%s: %s\r\n" % (k, v) for k, v in (headers or {}).items()
+        )
         req = (
             "GET %s HTTP/1.1\r\n"
             "Host: %s:%d\r\n"
@@ -191,7 +227,8 @@ class MiniWS:
             "Connection: Upgrade\r\n"
             "Sec-WebSocket-Key: %s\r\n"
             "Sec-WebSocket-Version: 13\r\n"
-            "\r\n" % (path, host, port, key)
+            "%s"
+            "\r\n" % (path, host, port, key, extra)
         )
         raw.sendall(req.encode("ascii"))
 
@@ -368,10 +405,15 @@ class FalconBeatSession:
             "username": "falconbeat-fpp",
             "clientId": "fpp-%d" % os.getpid(),
         }
-        if self.cfg.get("falconbeatToken"):
-            params["creator"] = self.cfg["falconbeatToken"]
         url = "%s/ws?%s" % (ws_base, urllib.parse.urlencode(params))
-        self.ws = MiniWS(url)
+        # Token rides the upgrade header — a ?creator= query lands in every
+        # proxy's access log on the way to beatsync.
+        headers = {}
+        if self.cfg.get("falconbeatToken"):
+            headers["Authorization"] = (
+                "Bearer %s" % self.cfg["falconbeatToken"]
+            )
+        self.ws = MiniWS(url, headers=headers)
         self._closed.clear()
         self._gen += 1
         gen = self._gen
@@ -609,27 +651,32 @@ class FalconBeatSession:
                 "upload/complete -> HTTP %d: %s" % (status, resp[:200])
             )
 
-    def push_file(self, local_path, media_name):
-        """PUT file to ingest -> returns public URL devices will fetch."""
+    def push_file(self, local_path, stored_name):
+        """PUT file to ingest -> returns public URL devices will fetch.
+        Streams from disk (Content-Length set) so upload memory doesn't
+        scale with file size."""
         ingest = self.cfg["httpBase"]
-        quoted = urllib.parse.quote(media_name)
-        with open(local_path, "rb") as f:
-            data = f.read()
-        status, resp = self._http(
-            "PUT",
-            "%s/media/%s" % (ingest, quoted),
-            body=data,
-            headers={
-                "Authorization": "Bearer %s" % self.cfg["falconbeatToken"],
-                "Content-Type": "application/octet-stream",
-            },
-            timeout=120,
-        )
+        quoted = urllib.parse.quote(stored_name)
+        f = open(local_path, "rb")
+        try:
+            status, resp = self._http(
+                "PUT",
+                "%s/media/%s" % (ingest, quoted),
+                body=f,
+                headers={
+                    "Authorization": "Bearer %s" % self.cfg["falconbeatToken"],
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(os.path.getsize(local_path)),
+                },
+                timeout=120,
+            )
+        finally:
+            f.close()
         if status >= 300:
             raise RuntimeError("ingest PUT -> HTTP %d: %s" % (status, resp[:200]))
-        stored = media_name
+        stored = stored_name
         try:
-            stored = json.loads(resp).get("stored", media_name)
+            stored = json.loads(resp).get("stored", stored_name)
         except ValueError:
             pass
         # Path-only URL: the listener resolves "/media/..." against the
@@ -644,12 +691,63 @@ class FalconBeatSession:
 
 
 def find_media_file(name):
-    """Resolve a mediaFilename from a playlist entry to an on-disk path."""
-    for sub in ("music", "videos", ""):
-        p = os.path.join(MEDIADIR, sub, name) if sub else os.path.join(MEDIADIR, name)
-        if os.path.isfile(p):
-            return p
-    return None
+    """Resolve a playlist media name to (path, subdir) under music/ or
+    videos/ — or (None, None).
+
+    The daemon runs as root and uploads whatever this returns, so only a
+    plain filename whose real path stays inside music/ or videos/ resolves:
+    "../" traversal, subdirectories, symlink escapes, and loose files
+    directly under media/ (settings, secrets) are all refused."""
+    if not name or os.path.basename(name) != name:
+        return None, None
+    for sub in ("music", "videos"):
+        base = os.path.realpath(os.path.join(MEDIADIR, sub))
+        cand = os.path.realpath(os.path.join(base, name))
+        if cand.startswith(base + os.sep) and os.path.isfile(cand):
+            return cand, sub
+    return None, None
+
+
+# -- video -> audio extraction ---------------------------------------------
+# Playlist "video" entries carry the soundtrack visitors should hear, but
+# pushing the whole video costs daemon memory, ingest disk, and a per-device
+# download. Instead ffmpeg lifts the audio track once into AUDIO_DIR,
+# keyed on source path+size+mtime so an edited video re-converts. Stream
+# copy keeps timing bit-identical; a transcode adds ~25-50ms codec delay
+# (absorbed by the sync offset).
+
+BROWSER_SAFE_AUDIO = {"aac": ".m4a", "mp3": ".mp3"}
+
+
+def _audio_codec(path):
+    """Primary audio codec of a media file via ffprobe, or None."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        out = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, timeout=30,
+        )
+        first = out.stdout.decode("utf-8", "replace").strip().split(",")[0]
+        return first.strip() or None
+    except Exception:
+        return None
+
+
+def _audio_cache_path(src_path, ext):
+    st = os.stat(src_path)
+    key = "%s|%d|%d" % (src_path, st.st_size, int(st.st_mtime))
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    base = re.sub(
+        r"[^A-Za-z0-9_.-]+", "_",
+        os.path.splitext(os.path.basename(src_path))[0],
+    )[:60]
+    return os.path.join(AUDIO_DIR, "%s.%s%s" % (base or "audio", h, ext))
 
 
 def fpp_status():
@@ -748,7 +846,6 @@ class FalconBeatDaemon:
         self._pushed = {}        # media_name -> public_url (uploaded, room-live)
         self._registered = set()  # urls registered on the room this connection
         self._pending_file_dels = set()  # names whose ingest DELETE failed
-        self._registered_at = {}  # url -> monotonic time of (re-)registration
         self._current_source = None
         self._current_media = None
         self._played_urls = set()  # sources that finished — pruned on next PLAY
@@ -769,6 +866,9 @@ class FalconBeatDaemon:
         self._sysinfo = None    # cached FPP system info (None = retry)
         self._failed_media = {}  # filename -> epoch of last failed lookup
         self._pb_lock = threading.Lock()  # serialize play()/pause()
+        self._outages = set()   # log-once keys for down-server warnings
+        self._state_sig = None  # last status.json content signature
+        self._state_written = 0.0
 
     # -- session lifecycle ----------------------------------------------
 
@@ -776,7 +876,6 @@ class FalconBeatDaemon:
         if msg.get("type") == "_disconnected":
             LOG.info("FalconBeat session dropped")
             self._registered.clear()
-            self._registered_at.clear()
             if self._playlist_active:
                 self._schedule_reconnect()
 
@@ -786,9 +885,11 @@ class FalconBeatDaemon:
             while self._playlist_active and not self._shutdown.is_set():
                 try:
                     self._connect()
+                    self._recovered("ws", "FalconBeat session recovered")
                     return
                 except Exception as e:
-                    LOG.warning("reconnect failed: %s; retry in %.0fs", e, delay)
+                    self._outage(
+                        "ws", "FalconBeat unreachable: %s" % e)
                     self._shutdown.wait(delay)
                     delay = min(delay * 2, 30.0)
 
@@ -829,7 +930,6 @@ class FalconBeatDaemon:
                     try:
                         session.register_source(name, url)
                         self._registered.add(url)
-                        self._registered_at[url] = time.monotonic()
                     except Exception as e:
                         LOG.warning("re-register %s failed: %s", name, e)
             if stale:
@@ -846,7 +946,6 @@ class FalconBeatDaemon:
                     self.session.close()
                     self.session = None
                 self._registered.clear()
-                self._registered_at.clear()
 
         if self._disconnect_timer:
             self._disconnect_timer.cancel()
@@ -879,23 +978,41 @@ class FalconBeatDaemon:
                 "PUT /config/%s -> HTTP %d: %s" % (name, status, resp[:200])
             )
 
+    def _outage(self, key, msg):
+        """Log a failure once per outage — a down server would otherwise
+        warn every retry until it comes back."""
+        if key not in self._outages:
+            self._outages.add(key)
+            LOG.warning("%s (further failures silent until recovery)", msg)
+
+    def _recovered(self, key, msg):
+        if key in self._outages:
+            self._outages.discard(key)
+            LOG.info(msg)
+
     def _set_nowplaying(self, doc):
         self._np_doc = doc
         try:
             self._put_config("nowplaying", doc)
+            self._recovered("nowplaying", "nowplaying push recovered")
         except Exception as e:
-            LOG.warning("nowplaying update failed: %s", e)
+            self._outage("nowplaying",
+                         "nowplaying update failed: %s" % e)
 
     def _nowplaying_heartbeat(self):
         while not self._shutdown.wait(self.NOWPLAYING_HEARTBEAT_S):
             doc = self._np_doc
             if not doc or not doc.get("playing"):
                 continue
+            if not configured(load_settings()):
+                continue
             doc["updatedAtMs"] = epoch_ms()
             try:
                 self._put_config("nowplaying", doc)
+                self._recovered("nowplaying", "nowplaying push recovered")
             except Exception as e:
-                LOG.warning("nowplaying heartbeat failed: %s", e)
+                self._outage("nowplaying",
+                             "nowplaying heartbeat failed: %s" % e)
 
     # -- show info (ingest /config/show) ---------------------------------
     # FPP is the single source of truth: the daemon renders the show doc
@@ -954,9 +1071,10 @@ class FalconBeatDaemon:
         try:
             self._put_config("show", doc)
             self._show_pushed = doc
+            self._recovered("show", "show config push recovered")
             LOG.info("show config pushed")
         except Exception as e:
-            LOG.warning("show config push failed: %s", e)
+            self._outage("show", "show config push failed: %s" % e)
 
     # -- fppd status reconciler ------------------------------------------
     # The callbacks only fire on NEW transitions: a playlist already playing
@@ -966,13 +1084,29 @@ class FalconBeatDaemon:
     # this never double-fires PLAY.
 
     RECONCILE_PERIOD_S = 3.0
+    IDLE_PERIOD_S = 30.0  # callbacks announce transitions; this is a net
     FAILED_RETRY_S = 60.0
 
     def _reconcile_loop(self):
-        while not self._shutdown.wait(self.RECONCILE_PERIOD_S):
+        while not self._shutdown.is_set():
+            # Idle ticks only keep an eye out for a missed playlist start —
+            # events drive everything while a show is actually running.
+            period = (self.RECONCILE_PERIOD_S if self._playlist_active
+                      else self.IDLE_PERIOD_S)
+            if self._shutdown.wait(period):
+                break
             try:
                 self.cfg = load_settings()
-                if not cfg_bool(self.cfg.get("enabled", "1")):
+                if not configured(self.cfg):
+                    # Disabled or unconfigured: no network, no fppd polls,
+                    # and no lingering admin session holding the room.
+                    self._playlist_active = False
+                    with self._session_lock:
+                        if self.session is not None:
+                            LOG.info("unconfigured/disabled — dropping session")
+                            self.session.close()
+                            self.session = None
+                    self._registered.clear()
                     continue
                 self._push_show()
                 st = fpp_status()
@@ -1007,9 +1141,11 @@ class FalconBeatDaemon:
                         try:
                             self.play(song)
                             self._failed_media.pop(song, None)
+                            self._recovered("play", "playback recovered")
                         except Exception as e:
-                            LOG.warning("reconcile PLAY %s failed: %s",
-                                        song, e)
+                            self._outage(
+                                "play", "reconcile PLAY %s failed: %s"
+                                % (song, e))
                             self._failed_media[song] = epoch_ms()
                     elif status_name == "paused" and self._current_source:
                         self.pause()
@@ -1038,6 +1174,78 @@ class FalconBeatDaemon:
                 LOG.warning("reconcile error: %s", e)
 
     # -- push/register/play ----------------------------------------------
+
+    def _video_audio(self, path):
+        """Uploadable audio path for a video entry: extract the soundtrack
+        into the plugindata cache (keyed on path+size+mtime). Browser-safe
+        codecs stream-copy (cheap, bit-identical timing); anything else
+        transcodes to AAC under nice — refused while a show is running on a
+        single-core board, where it could starve fppd."""
+        codec = _audio_codec(path)
+        ext = BROWSER_SAFE_AUDIO.get(codec, ".m4a")
+        out = _audio_cache_path(path, ext)
+        if os.path.isfile(out):
+            return out
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError(
+                "ffmpeg not found — cannot extract %s" % path)
+        os.makedirs(AUDIO_DIR, exist_ok=True)
+        tmp = out + ".part"
+        nice = [p for p in (shutil.which("nice"),) if p]
+        if codec in BROWSER_SAFE_AUDIO:
+            # -readrate keeps ffmpeg from racing the SD card while fppd is
+            # reading the same show files.
+            cmd = nice + ["-n", "19"] * bool(nice) + [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-readrate", "3", "-i", path, "-vn", "-c:a", "copy", tmp,
+            ]
+        else:
+            if (os.cpu_count() or 1) < 2 and self._playlist_active:
+                raise RuntimeError(
+                    "video %s: codec %r needs a re-encode — refused while a "
+                    "show is playing on a single-core board"
+                    % (os.path.basename(path), codec))
+            cmd = nice + ["-n", "19"] * bool(nice) + [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-readrate", "2", "-i", path, "-vn", "-threads", "1",
+                "-c:a", "aac", "-b:a", "160k", tmp,
+            ]
+        try:
+            subprocess.run(
+                cmd, check=True, timeout=1800,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            os.replace(tmp, out)
+            LOG.info("extracted audio from video %s -> %s",
+                     os.path.basename(path), os.path.basename(out))
+            # Cache names are content-keyed, so an edited video orphans its
+            # old extraction — prune entries not touched in a week.
+            cutoff = time.time() - 7 * 86400
+            try:
+                for fn in os.listdir(AUDIO_DIR):
+                    fp = os.path.join(AUDIO_DIR, fn)
+                    if os.path.getmtime(fp) < cutoff:
+                        os.unlink(fp)
+            except OSError:
+                pass
+            return out
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or b"").decode("utf-8", "replace")[-300:]
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "audio extraction failed for %s: rc=%d %s"
+                % (path, e.returncode, detail))
+        except Exception as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "audio extraction failed for %s: %s" % (path, e))
 
     def ensure_source(self, media_name):
         """Make sure media_name is uploaded to ingest AND registered on the
@@ -1071,14 +1279,17 @@ class FalconBeatDaemon:
                     )
             else:
                 try:
-                    path = find_media_file(media_name)
+                    path, sub = find_media_file(media_name)
                     if not path:
                         raise FileNotFoundError(
-                            "media file %r not found under %s" % (media_name, MEDIADIR)
+                            "media file %r not found under music/ or "
+                            "videos/ (or path refused)" % media_name
                         )
+                    upload = self._video_audio(path) if sub == "videos" \
+                        else path
                     LOG.info("pushing %s -> ingest", media_name)
                     url = self._connect().push_file(
-                        path, os.path.basename(media_name)
+                        upload, os.path.basename(upload)
                     )
                     self._pushed[media_name] = url
                     self._push_errors.pop(media_name, None)
@@ -1104,14 +1315,13 @@ class FalconBeatDaemon:
                 if url not in self._registered:
                     session.register_source(media_name, url)
                     self._registered.add(url)
-                    self._registered_at[url] = time.monotonic()
         return url
 
-    def play(self, media_name, data=None, gated=False):
+    def play(self, media_name, data=None):
         with self._pb_lock:
-            self._play(media_name, data, gated)
+            self._play(media_name, data)
 
-    def _play(self, media_name, data=None, gated=False):
+    def _play(self, media_name, data=None):
         if media_name == self._current_media:
             return
         self._playlist_active = True
@@ -1129,28 +1339,17 @@ class FalconBeatDaemon:
         self._set_nowplaying(doc)
 
         session = self._connect()
-        # Room membership check BEFORE ensure_source registers — devices start
-        # downloading on SET_AUDIO_SOURCES, so a URL registered during this
-        # call means the download only just began.
-        known_urls = set(self._registered)
         url = self.ensure_source(media_name)
-        just_registered = url not in known_urls
         delay = session.expected_delay_s()
-        if gated:
-            # fppd is blocked in the media callback. We release it just before
-            # serverTimeToExecute so FPP's media output starts at position 0
-            # at (almost) the same instant devices start at position 0 — the
-            # server's scheduling delay becomes a between-track pause instead
-            # of missing intro audio.
-            lag = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
-            target = 0.0
-            LOG.info("PLAY %s @ 0s (gated; holding ~%.2fs)",
-                     media_name, delay)
-        else:
-            pos, _playing = fpp_position_seconds()
-            target = pos + delay
-            LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f)",
-                     media_name, target, pos, delay)
+        pos, _playing = fpp_position_seconds()
+        offset = float(self.cfg.get("syncOffsetMs") or 0) / 1000.0
+        # Devices execute PLAY delay-s from now, landing at track position
+        # `target` — self-correcting since pos is sampled live, so a device
+        # that joins a beat late is still on the right note, just quieter
+        # for the missed intro. syncOffsetMs nudges where they land.
+        target = pos + delay + offset
+        LOG.info("PLAY %s @ %.2fs (fpp pos %.2f + delay %.2f + offset %.3f)",
+                 media_name, target, pos, delay, offset)
         # Silence the previous track's tail while devices load the new one.
         old_source = self._current_source
         if old_source and old_source != url:
@@ -1164,20 +1363,6 @@ class FalconBeatDaemon:
                 )
             except Exception as e:
                 LOG.warning("pre-play PAUSE of old source failed: %s", e)
-        # Freshly registered file + gated start: devices only just learned
-        # the URL and download it over WAN. The server's 3s load-coordination
-        # clock doesn't start until PLAY arrives — give the download a head
-        # start first so devices fit inside that window instead of missing
-        # the intro. FPP stays gated the whole time either way.
-        settle = float(self.cfg.get("preloadSettleMs") or 0) / 1000.0
-        # Fresh means "registered within the settle window" — covers a URL
-        # the pre-push thread registered seconds ago at playlist start too,
-        # which is exactly when track 1 needs the head start.
-        fresh = time.monotonic() - self._registered_at.get(url, 0) < settle
-        if gated and settle > 0 and (just_registered or fresh):
-            LOG.info("new source %s — settling %.2fs for device download",
-                     media_name, settle)
-            time.sleep(settle)
         _t = time.monotonic()
         echo = session.send_command(
             {"type": "PLAY", "audioSource": url, "trackTimeSeconds": target}
@@ -1225,29 +1410,8 @@ class FalconBeatDaemon:
         self._played_urls = set()
         if stale:
             self._delete_room_sources(sorted(stale), reason="played/skipped")
-        exec_ms = echo.get("serverTimeToExecute")
-        LOG.info("PLAY confirmed, executes at server ts %s", exec_ms)
-        if gated:
-            # Hold the gate so FPP's media starts lag-ms before devices fire.
-            # Server delay is capped at 3s — cap the hold a bit above that.
-            now_ms = session.server_now_ms()
-            remaining_s = (exec_ms - now_ms) / 1000.0 if exec_ms else None
-            LOG.info(
-                "[timing] server_now_ms=%.1f exec_ms=%s remaining_s=%s lag_s=%.3f",
-                now_ms, exec_ms, remaining_s, lag,
-            )
-            if exec_ms and session.best_rtt_ms is not None:
-                # NTP offset is measured — trust the server-clock delta.
-                wait = remaining_s - lag
-            else:
-                # No NTP offset yet (or no exec_ms): derive the hold from the
-                # delay we computed and the monotonic time since PLAY went out.
-                elapsed = time.monotonic() - _t
-                wait = delay - elapsed - lag
-            wait = min(max(wait, 0.0), 3.5)
-            LOG.info("[timing] final gate wait=%.3fs", wait)
-            if wait:
-                time.sleep(wait)
+        LOG.info("PLAY confirmed, executes at server ts %s",
+                 echo.get("serverTimeToExecute"))
 
     def pause(self):
         with self._pb_lock:
@@ -1284,8 +1448,8 @@ class FalconBeatDaemon:
         data = ev.get("data") or {}
 
         self.cfg = load_settings()
-        if not cfg_bool(self.cfg.get("enabled", "1")):
-            return True  # nothing to do — release the gate immediately
+        if not configured(self.cfg):
+            return True  # disabled or unconfigured — nothing to do
 
         try:
             if cb_type == "playlist":
@@ -1416,10 +1580,12 @@ class FalconBeatDaemon:
             for n in names:
                 self._pushed.pop(n, None)
             self._registered.difference_update(urls)
-            for u in urls:
-                self._registered_at.pop(u, None)
         if names:
-            self._delete_media_files(names)
+            # The stored filename comes from the URL, not the media name —
+            # a video entry uploads as its extracted-audio file.
+            self._delete_media_files(
+                [urllib.parse.unquote(u.rsplit("/", 1)[-1]) for u in urls]
+            )
 
     def _delete_media_files(self, names):
         """DELETE evicted files via ingest. Failures go to
@@ -1492,7 +1658,8 @@ class FalconBeatDaemon:
     def _push_ahead(self, idx):
         """Ensure the playlist entry after queue position idx is uploaded +
         registered — devices then download it while the current track plays,
-        so the next gated PLAY doesn't wait on the WAN fetch."""
+        so the next PLAY's device download isn't racing the schedule
+        delay."""
         if not self._playlist_active or self._shutdown.is_set():
             return
         nxt = idx + 1
@@ -1511,12 +1678,15 @@ class FalconBeatDaemon:
         if entry_type in ("both", "media", "video") and media_name:
             # fresh media -> any pending disconnect is moot while a playlist runs
             try:
-                # fppd is blocked in our callback inside PreparePlay — the
-                # media output doesn't exist yet, so this is a gated start.
-                self.play(media_name, data, gated=True)
+                # The callback already returned — fppd is playing. Devices
+                # join at the computed track position (late by the schedule
+                # delay, but on the right note).
+                self.play(media_name, data)
+                self._recovered("play", "playback recovered")
                 return True
             except Exception as e:
-                LOG.exception("PLAY %s failed: %s", media_name, e)
+                self._outage("play", "PLAY %s failed: %s" % (media_name, e))
+                LOG.debug("PLAY %s traceback:", media_name, exc_info=True)
                 return False
         elif entry_type in ("pause", "sequence", "event"):
             # non-audio playlist entry: park listeners
@@ -1567,27 +1737,25 @@ class FalconBeatDaemon:
                 conn.sendall(b'{"ok":true}')
                 return
             ok = self.handle_event(ev)
-            # A "wait" event comes from the media callback while fppd is
-            # blocked in waitpid() inside PreparePlay — replying releases the
-            # gate and lets the track start.
-            if ev.get("wait"):
-                try:
-                    conn.sendall(
-                        json.dumps({"ok": bool(ok)}).encode("utf-8") + b"\n"
-                    )
-                except OSError:
-                    pass
+            # Done-ack for callers that wait (tests, debugging) — the fppd
+            # callback never does, so this never holds fppd up.
+            try:
+                conn.sendall(
+                    json.dumps({"ok": bool(ok)}).encode("utf-8") + b"\n"
+                )
+            except OSError:
+                pass
         finally:
             try:
                 conn.close()
             except OSError:
                 pass
 
-    def _write_state(self):
-        """Status file rendered by status.php."""
+    def _write_state(self, force=False):
+        """Status file rendered by status.php. Written only when something
+        actually changed (plus a 60s freshness touch) — an idle daemon
+        shouldn't rewrite the SD card every few seconds."""
         state = {
-            "pid": os.getpid(),
-            "time": time.time(),
             "connected": bool(self.session and self.session._connected.is_set()),
             "playlistActive": self._playlist_active,
             "currentMedia": self._current_media,
@@ -1596,18 +1764,30 @@ class FalconBeatDaemon:
             "registered": sorted(self._registered),
             "roomId": self.cfg.get("roomId"),
             "serverAddr": self.cfg.get("serverAddr"),
-            "enabled": cfg_bool(self.cfg.get("enabled", "1")),
+            "enabled": cfg_bool(self.cfg.get("enabled", "0")),
             "listenerCount": (
                 self.session.listener_count if self.session else 0
             ),
             "nowPlaying": self._np_doc,
         }
         try:
+            sig = json.dumps(state, sort_keys=True)
+        except (TypeError, ValueError):
+            sig = None
+        now = time.time()
+        if (not force and sig == self._state_sig
+                and now - self._state_written < 60):
+            return
+        state["pid"] = os.getpid()
+        state["time"] = now
+        try:
             os.makedirs(DATADIR, exist_ok=True)
             tmp = STATE_PATH + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(state, f)
             os.replace(tmp, STATE_PATH)
+            self._state_sig = sig
+            self._state_written = now
         except OSError as e:
             LOG.warning("state write failed: %s", e)
 
@@ -1618,12 +1798,16 @@ class FalconBeatDaemon:
         # single instance via socket bind
         try:
             if HAS_UNIX:
+                # Any existing socket is stale by definition — the instance
+                # lock proves no live daemon can own it.
                 if os.path.exists(SOCK_PATH):
                     os.unlink(SOCK_PATH)
                 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 srv.bind(SOCK_PATH)
                 try:
-                    os.chmod(SOCK_PATH, 0o666)
+                    # fppd's callbacks run as root like us; nobody else has
+                    # business on the control channel.
+                    os.chmod(SOCK_PATH, 0o600)
                 except OSError:
                     pass
             else:
@@ -1664,9 +1848,9 @@ class FalconBeatDaemon:
                 )
             except Exception:
                 pass
-            self._write_state()
             if self.session:
                 self.session.close()
+            self._write_state(force=True)
             srv.close()
             for p in (SOCK_PATH, PID_PATH):
                 try:
@@ -1689,15 +1873,47 @@ def control_connect(timeout=2):
     return socket.create_connection((host, int(port)), timeout=timeout)
 
 
+def _acquire_instance_lock():
+    """Exclusive flock held for the life of the process — exactly one
+    daemon runs no matter how many launchers fire (postStart, lifecycle
+    callback, first event). Returns the open fd to keep, False if another
+    daemon holds it, None where flock doesn't exist."""
+    if fcntl is None:
+        return None
+    try:
+        fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        return fd
+    except OSError:
+        return None
+
+
 def main():
     os.makedirs(LOGDIR, exist_ok=True)
-    logging.basicConfig(
-        filename=os.path.join(LOGDIR, "plugin-%s.log" % PLUGIN_NAME),
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    # already running? -> control socket ping tells us
-    if os.path.exists(SOCK_PATH):
+    # WatchedFileHandler re-opens the file each emit, so the daemon keeps
+    # logging after FPP's logrotate renames plugin-*.log (create, not
+    # copytruncate) instead of writing into the rotated .1 forever.
+    handler = logging.handlers.WatchedFileHandler(
+        os.path.join(LOGDIR, "plugin-%s.log" % PLUGIN_NAME))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+    # Single instance: the flock is check-and-hold atomically, unlike a
+    # socket ping which races between two simultaneous launches.
+    os.makedirs(DATADIR, exist_ok=True)
+    lock_fd = _acquire_instance_lock()
+    if lock_fd is False:
+        print("falconbeatd already running (lock held)")
+        return 0
+    # Fallback for platforms without flock: ping the control socket.
+    if lock_fd is None and os.path.exists(SOCK_PATH):
         try:
             s = control_connect()
             s.sendall(b'{"cb_type":"ping"}')
@@ -1710,7 +1926,12 @@ def main():
             pass  # stale socket; take over
 
     daemon = FalconBeatDaemon()
-    return daemon.run()
+    daemon._instance_lock = lock_fd  # pin the fd open for process life
+    try:
+        return daemon.run()
+    except Exception:
+        LOG.exception("falconbeatd crashed")
+        raise
 
 
 if __name__ == "__main__":

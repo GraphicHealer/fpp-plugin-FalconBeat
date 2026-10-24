@@ -19,7 +19,8 @@
  *
  * The FalconBeat edge is ONE published port: serverAddr carries the admin
  * WS, ingest writes, and the gated HTTP endpoints; one FALCONBEAT_TOKEN is
- * ?creator= on the WS and Bearer on /upload/complete + ingest writes.
+ * an Authorization Bearer everywhere — never a query parameter (a proxy
+ * access log would capture it).
  *
  * The Test button probes the saved values: edge /health, the shared
  * Bearer token, the WS upgrade, the upload/complete gate, and /media.
@@ -160,7 +161,7 @@ function fb_http($method, $url, $headers = array(), $body = null, $timeout = 4) 
  * WS upgrade probe — checks the server answers 101 Switching Protocols.
  * ws:// only (direct LAN); returns 'skip' for wss.
  */
-function fb_ws_probe($wsUrl, $query, $timeout = 4) {
+function fb_ws_probe($wsUrl, $query, $headers = array(), $timeout = 4) {
     $u = parse_url($wsUrl);
     if (!$u || !isset($u['host'])) return array(false, 'bad URL');
     if ($u['scheme'] !== 'ws') return array(false, 'skipped (wss — check in browser)');
@@ -172,7 +173,9 @@ function fb_ws_probe($wsUrl, $query, $timeout = 4) {
     $path = '/ws?' . $query;
     $req = "GET $path HTTP/1.1\r\nHost: {$u['host']}:$port\r\n" .
            "Upgrade: websocket\r\nConnection: Upgrade\r\n" .
-           "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n";
+           "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n";
+    foreach ($headers as $h) $req .= $h . "\r\n";
+    $req .= "\r\n";
     fwrite($fp, $req);
     $line = fgets($fp);
     fclose($fp);
@@ -227,11 +230,13 @@ function fb_tests($v) {
     }
 
     // 3. WS upgrade (room auto-creates; secret validity shows up as admin
-    //    status, not the handshake — a 101 means the socket works)
+    //    status, not the handshake — a 101 means the socket works). The
+    //    token rides the Authorization header, never the query string.
     $q = http_build_query(array(
         'roomId' => '000000', 'username' => 'fpp-config-test',
-        'clientId' => 'cfgtest', 'creator' => $token));
-    list($ok, $detail) = fb_ws_probe($ws, $q);
+        'clientId' => 'cfgtest'));
+    list($ok, $detail) = fb_ws_probe($ws, $q,
+        array('Authorization: Bearer ' . $token));
     $results[] = array('FalconBeat WebSocket', $ok, $detail);
 
     // 4. upload/complete gate — Caddy checks the Bearer before proxying:

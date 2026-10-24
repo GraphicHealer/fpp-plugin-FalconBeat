@@ -25,8 +25,12 @@ pip installs are system-wide across plugins).
 
 - fppd probes `callbacks{,.sh,.pl,.php,.py}` — `callbacks.py` is used.
 - `callbacks.py --list` → `media,playlist,lifecycle` (10s answer timeout).
-- `callbacks.py --type media --data '<json>'` — media JSON: `{type: both|media|
-  sequence|pause|video|event, Sequence, Media, <id3 tags>}`. Blocking.
+- `--type media --data '<json>'` — media JSON: `{type: both|media|
+  sequence|pause|video|event, Sequence, Media, <id3 tags>}`. Blocking —
+  fppd waitpid()s on the MAIN LOOP inside PreparePlay, so the callback
+  must never wait on the daemon: it forwards the event over the control
+  socket and exits (fire-and-forget). Events are also dropped unless the
+  plugin is enabled AND serverAddr+token are set (`plugin_ready()`).
 - `--type playlist --data '<json>'` — `Playlist::GetInfo()` + `{Action:
   start|playing|query_next|stop, Section: LeadIn|MainPlaylist|LeadOut,
   Item: int index within that section}` (PlaylistCallback::run @
@@ -46,27 +50,28 @@ ingest `PUT/DELETE /media/*` + `PUT /config/*` (token-checked by ingest
 itself), public `GET /media/*`, and the listener SPA. `serverAddr` in
 settings is the LAN edge (`host[:port]` or full URL — `_split_addr`
 derives `wsBase`/`httpBase`). ONE shared secret, `falconbeatToken`
-(= the server's FALCONBEAT_TOKEN), is `?creator=` on the admin WS AND
-the Bearer on `/upload/complete` AND ingest writes.
+(= the server's FALCONBEAT_TOKEN), is the `Authorization: Bearer` upgrade
+header on the admin WS AND the Bearer on `/upload/complete` AND ingest
+writes — never a query string (proxy access logs would capture it).
 
-- WS: `ws://host[:port]/ws?roomId&username&clientId&creator=TOKEN`
-  (non-demo; `?admin=` is demo-only). Plaintext JSON messages, not binary.
+- WS: `ws://host[:port]/ws?roomId&username&clientId` with header
+  `Authorization: Bearer TOKEN` (server build accepts header or legacy
+  `?creator=`; `?admin=` is demo-only). Plaintext JSON, not binary.
 - Send `{"type":"PLAY","audioSource":url,"trackTimeSeconds":pos}` /
   `{"type":"PAUSE",...}` — the `SCHEDULED_ACTION` echo (match type +
   audioSource) is the ONLY acceptance signal; rejections are silent.
 - `trackTimeSeconds` is the playback offset at execute time — send FPP
-  position + expected delay = `max(400, 1.5*maxClientRTT+200,
-  maxCompensation+200)`ms capped 3s (we compute it from CLIENT_CHANGE stats
-  + our own NTP RTT; `nudgeMs` setting adds on top).
+  position (sampled live at event time) + expected delay =
+  `max(400, 1.5*maxClientRTT+200, maxCompensation+200)`ms capped 3s
+  (we compute it from CLIENT_CHANGE stats + our own NTP RTT; `nudgeMs`
+  setting adds on top) + `syncOffsetMs` (the user-facing tune knob).
+  Devices land a schedule-delay late but at the RIGHT position — no
+  gating of FPP, ever; a missed join is a late join at the same beat.
 - Server load-coordination clock starts at PLAY: it waits ≤3s for client
   AUDIO_SOURCE_LOADED ACKs, then schedules regardless. Devices fetch audio
   over WAN — a freshly registered URL may not fit in 3s → they SYNC in
-  late at the right offset (observed: "device starts ~3s late, synced").
-  `preloadSettleMs` (default 2500) sleeps before PLAY on gated starts when
-  the URL was registered within the settle window (tracked via
-  `_registered_at`) — covers both a URL registered during that call and
-  one the playlist-start pre-push registered seconds earlier; the gate
-  holds FPP meanwhile (counts against gateMaxSec).
+  late at the right offset. The lookahead usually has the file on-device
+  well before its PLAY, so the load window is a safety net, not the plan.
 - Push flow (no S3): `PUT <edge>/media/<name>` (Bearer TOKEN) →
   `POST <edge>/upload/complete {roomId, originalName, publicUrl}` with
   the same Bearer TOKEN (Caddy gates it — 403 without). The registered
@@ -122,6 +127,37 @@ the Bearer on `/upload/complete` AND ingest writes.
 - Room→source bindings are in-memory only → re-run `upload/complete` after
   any server restart (daemon does this on every (re)connect).
 
+## Daemon ops notes (§ guidelines compliance)
+
+- Nothing runs until configured: `enabled` defaults 0 and events/reconcile
+  early-out on `configured(cfg)` = enabled + serverAddr + token all set.
+  An unconfigure mid-run drops the admin session too.
+- Single instance via `fcntl.flock(LOCK_EX|NB)` on `plugindata/.../
+  falconbeatd.lock` held for process life — postStart, the lifecycle
+  callback and the first event may all launch; extras exit cleanly. The
+  unix control socket is 0600 (root↔root only).
+- Only files under `media/music/` or `media/videos/` are uploadable —
+  `find_media_file` realpaths and refuses traversal, subdirs, symlink
+  escapes and loose files under media/ (the daemon is root).
+- Uploads stream from disk (Content-Length set, http.client block-reads).
+- Video entries: `_video_audio` extracts the soundtrack via ffmpeg into
+  `plugindata/.../audio/` keyed on path+size+mtime — stream copy for
+  aac/mp3 (bit-identical timing), `nice -n 19 -threads 1 -readrate 2` AAC
+  transcode otherwise (refused while a show plays on single-core). Stored
+  name = the extracted file's basename; ingest DELETE derives it from the
+  room URL, not the media name.
+- Idle cost ≈ 0: reconcile polls fppd every 3s while a playlist is active,
+  30s otherwise; settings re-parse only on mtime/size change; status.json
+  writes only on change (+60s freshness touch); server outages log once
+  per failure class, then again on recovery.
+- Logging goes through `WatchedFileHandler` so the daemon follows the file
+  across FPP's logrotate (rename+create, not copytruncate); postStart and
+  the respawn path send stdout/stderr to /dev/null so no held fd writes
+  into the rotated .1.
+- fppd status reconcile: the callbacks only fire on NEW transitions — a
+  playlist already playing when the daemon comes up converges via the
+  fppd-status poll (handlers dedupe on _current_media).
+
 ## Dev/testing
 
 ```bash
@@ -131,11 +167,12 @@ python -m py_compile falconbeatd.py callbacks.py
 # Fake-stack integration test (works on Windows too — control channel falls
 # back from unix socket to a localhost TCP port written to falconbeatd.port).
 # The throwaway script isn't in the repo — recreate from fbtest.py (kept in
-# the dev machine's temp dir): it
-# spins up fake ingest (:18090), fake falconbeat WS+HTTP (:18080), fake fppd
-# status (:13232), starts the daemon and drives playlist/media events.
-# Verified: PUT ingest, upload/complete, NTP pairs, LIVENESS_PONG,
-# PLAY(fpp pos + delay), PAUSE on stop, graceful shutdown.
+# the dev machine's temp dir): it spins up ONE fake edge (:18080 — WS +
+# Bearer-gated HTTP + ingest), fake fppd (:13232), starts the daemon and
+# drives playlist/media events through the control socket.
+# Verified: queue fetch, start-window push, PLAY(pos+delay+offset), loop
+# wrap, eviction + pending-delete retry, reconnect keep-set, stop cleanup,
+# Bearer on every write, media-root/../ name refusal.
 ```
 
 FPP settings live in `config/plugin.fpp-plugin-FalconBeat` (key=value);
@@ -149,4 +186,4 @@ plugin.* is used until the settings page migrates it. Daemon re-reads them
 per event — no restart needed. Plugin log:
 `logs/plugin-fpp-plugin-FalconBeat.log` (FPP rotates; keep exactly this name).
 Daemon runtime state: `plugindata/fpp-plugin-FalconBeat/{falconbeatd.sock,
-falconbeatd.pid,status.json}`.
+falconbeatd.pid,falconbeatd.lock,status.json,audio/}`.

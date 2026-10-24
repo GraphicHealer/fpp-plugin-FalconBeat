@@ -9,9 +9,11 @@ FPPD calls this via scripts/eventScript:
     callbacks.py --type playlist  --data '<json>'
     callbacks.py --type lifecycle startup|shutdown
 
-These calls are synchronous from fppd's point of view (it waitpid()s), so this
-script must return fast: it forwards the event to falconbeatd over its unix
-control socket and exits. If the daemon is down it is (re)spawned first.
+These calls are synchronous from fppd's point of view (it waitpid()s on the
+main loop — PLUGIN_GUIDELINES forbids stalling it), so this script must
+return fast: it forwards the event to falconbeatd over its unix control
+socket and exits WITHOUT waiting for the daemon to act on it. If the daemon
+is down it is (re)spawned first — itself a bounded ~5s cost on first use.
 """
 
 import json
@@ -34,25 +36,35 @@ DAEMON = os.path.join(PLUGINDIR, "falconbeatd.py")
 SETTINGS_PATH = os.path.join(
     MEDIADIR, "config", "plugin." + PLUGIN_NAME
 )
-DEFAULT_GATE_SEC = 10.0
+SECRETS_PATH = os.path.join(DATADIR, "secrets")
 LOG_FILE = os.path.join(LOGDIR, "plugin-%s.log" % PLUGIN_NAME)
 PY = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
 
 
-def gate_sec():
-    """How long a media callback may hold the track start waiting for the
-    daemon's ready reply (fppd blocks in waitpid inside PreparePlay, so
-    returning releases the gate and the track starts). 0 = don't gate."""
+def _read_kv(path):
+    out = {}
     try:
-        with open(SETTINGS_PATH) as f:
+        with open(path) as f:
             for line in f:
                 k, _, v = line.partition("=")
-                if k.strip() == "gateMaxSec":
-                    v = v.strip().strip('"')
-                    return float(v) if v else 0.0
-    except (OSError, ValueError):
+                out[k.strip()] = v.strip().strip('"')
+    except OSError:
         pass
-    return DEFAULT_GATE_SEC
+    return out
+
+
+def plugin_ready():
+    """Enabled + serverAddr + token all set — until then nothing runs.
+    Defaults deliberately fail closed: a fresh install is inert."""
+    cfg = _read_kv(SETTINGS_PATH)
+    enabled = str(cfg.get("enabled", "0")).strip().lower() not in (
+        "0", "false", "no", "off", "",
+    )
+    if not enabled or not (cfg.get("serverAddr") or "").strip():
+        return False
+    token = cfg.get("falconbeatToken") or _read_kv(SECRETS_PATH).get(
+        "falconbeatToken")
+    return bool((token or "").strip())
 
 
 def control_connect(timeout=5):
@@ -97,15 +109,14 @@ def daemon_alive():
 
 
 def start_daemon():
-    """Spawn falconbeatd detached, appending to the plugin log."""
+    """Spawn falconbeatd detached. Output goes to /dev/null — the daemon
+    logs through its own rotation-safe handler, and an fd held open here
+    would keep writing into the rotated .1 file forever."""
     os.makedirs(DATADIR, exist_ok=True)
-    try:
-        f = open(LOG_FILE, "ab", buffering=0)
-    except OSError:
-        f = subprocess.DEVNULL
     subprocess.Popen(
         [PY, DAEMON],
-        stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         start_new_session=True, cwd=PLUGINDIR,
     )
     # wait for the control socket to accept
@@ -142,7 +153,8 @@ def main(argv):
         # lifecycle passes the phase as a bare arg: --type lifecycle startup
         if name in ("startup", "shutdown"):
             if name == "startup":
-                ensure_daemon()
+                if plugin_ready():
+                    ensure_daemon()
             else:
                 try:
                     send_to_daemon({"cb_type": "shutdown"})
@@ -151,6 +163,8 @@ def main(argv):
             return 0
 
     if cb_type in ("media", "playlist"):
+        if not plugin_ready():
+            return 0
         try:
             data = json.loads(data_arg) if data_arg else {}
         except ValueError:
@@ -158,25 +172,14 @@ def main(argv):
         if not ensure_daemon():
             log("daemon unavailable; dropped %s event" % cb_type)
             return 1
-        # Media callbacks are blocking inside fppd's PreparePlay — before the
-        # media output exists. Holding our reply until the daemon finishes
-        # push + PLAY means the track can't start before devices are ready.
-        gate = gate_sec() if cb_type == "media" else 0.0
-        payload = {"cb_type": cb_type, "data": data}
-        if gate > 0:
-            payload["wait"] = True
+        # Fire and forget — fppd waitpid()s on this script on its main loop,
+        # so the event is handed off and we exit. The daemon PLAYs devices at
+        # the right track offset; they join a schedule-delay late but synced.
         try:
-            reply = send_to_daemon(
-                payload, want_reply=(gate > 0), timeout=(gate if gate > 0 else 5)
-            )
+            send_to_daemon({"cb_type": cb_type, "data": data})
         except OSError as e:
             log("failed to forward %s event: %s" % (cb_type, e))
             return 1
-        if gate > 0:
-            if not reply:
-                log("sync gate: no daemon reply within %.1fs — released" % gate)
-            elif b'"ok":false' in reply:
-                log("sync gate: daemon reported not-ready — released")
         return 0
 
     # Unknown invocation — answer --list-style so fppd just ignores us
