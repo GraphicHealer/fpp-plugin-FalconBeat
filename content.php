@@ -338,7 +338,6 @@ PrintSettingGroup('FalconBeatShow', '', '', 1, $pluginName);
 </div>
 <?php
 PrintSettingGroup('FalconBeatAdvanced', '', '', 1, $pluginName);
-PrintSettingGroup('FalconBeatDeveloper', '', '', 1, $pluginName);
 ?>
 </div>
 
