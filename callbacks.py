@@ -13,7 +13,9 @@ These calls are synchronous from fppd's point of view (it waitpid()s on the
 main loop — PLUGIN_GUIDELINES forbids stalling it), so this script must
 return fast: it forwards the event to falconbeatd over its unix control
 socket and exits WITHOUT waiting for the daemon to act on it. If the daemon
-is down it is (re)spawned first — itself a bounded ~5s cost on first use.
+is down it is respawned DETACHED and the event dropped — waiting for a dead
+daemon to come up (or a wedged socket to answer) would stall fppd, and the
+daemon's reconcile loop converges on fppd's real state once it is up.
 """
 
 import json
@@ -87,51 +89,53 @@ def log(msg):
         pass
 
 
-def send_to_daemon(payload, want_reply=False, timeout=5):
+def send_to_daemon(payload, timeout=1):
     s = control_connect(timeout)
     s.sendall(json.dumps(payload).encode("utf-8"))
     s.shutdown(socket.SHUT_WR)
-    reply = b""
-    if want_reply:
-        try:
-            reply = s.recv(4096)
-        except OSError:
-            pass
     s.close()
-    return reply
 
 
-def daemon_alive():
+def daemon_up():
+    """Is the daemon's control socket accepting? A bare connect is the
+    whole check — pinging would add a recv that a wedged-but-listening
+    daemon could hold open for the whole timeout."""
     try:
-        return b'"ok":true' in send_to_daemon({"cb_type": "ping"}, want_reply=True)
+        control_connect(timeout=1).close()
+        return True
     except OSError:
         return False
 
 
-def start_daemon():
-    """Spawn falconbeatd detached. Output goes to /dev/null — the daemon
-    logs through its own rotation-safe handler, and an fd held open here
-    would keep writing into the rotated .1 file forever."""
+def spawn_daemon():
+    """Spawn falconbeatd detached and return IMMEDIATELY — fppd is
+    waitpid()ing on this script, so we never wait for the daemon to come
+    up. The stamp file rate-limits spawns so callbacks firing while a
+    spawn is still booting don't pile up doomed children (the daemon's
+    own flock decides which instance lives). Output goes to /dev/null —
+    the daemon logs through its own rotation-safe handler, and an fd
+    held open here would keep writing into the rotated .1 file forever."""
+    stamp = os.path.join(DATADIR, "falconbeatd.spawn")
+    try:
+        if time.time() - os.path.getmtime(stamp) < 10:
+            return  # a spawn is already in flight
+    except OSError:
+        pass
     os.makedirs(DATADIR, exist_ok=True)
-    subprocess.Popen(
-        [PY, DAEMON],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True, cwd=PLUGINDIR,
-    )
-    # wait for the control socket to accept
-    for _ in range(50):
-        if daemon_alive():
-            return True
-        time.sleep(0.1)
-    log("daemon did not come up within 5s")
-    return False
-
-
-def ensure_daemon():
-    if daemon_alive():
-        return True
-    return start_daemon()
+    try:
+        open(stamp, "w").close()
+    except OSError:
+        pass
+    try:
+        subprocess.Popen(
+            [PY, DAEMON],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True, cwd=PLUGINDIR,
+        )
+        log("daemon was down — spawned detached")
+    except OSError as e:
+        log("daemon spawn failed: %s" % e)
 
 
 def main(argv):
@@ -153,8 +157,8 @@ def main(argv):
         # lifecycle passes the phase as a bare arg: --type lifecycle startup
         if name in ("startup", "shutdown"):
             if name == "startup":
-                if plugin_ready():
-                    ensure_daemon()
+                if plugin_ready() and not daemon_up():
+                    spawn_daemon()
             else:
                 try:
                     send_to_daemon({"cb_type": "shutdown"})
@@ -169,9 +173,6 @@ def main(argv):
             data = json.loads(data_arg) if data_arg else {}
         except ValueError:
             data = {"_raw": data_arg}
-        if not ensure_daemon():
-            log("daemon unavailable; dropped %s event" % cb_type)
-            return 1
         # Fire and forget — fppd waitpid()s on this script on its main loop,
         # so the event is handed off and we exit. The daemon PLAYs devices at
         # the right track offset; they join a schedule-delay late but synced.
@@ -179,10 +180,14 @@ def main(argv):
         # device's scheduled start instant to it.
         try:
             send_to_daemon(
-                {"cb_type": cb_type, "data": data, "ts": time.time()})
-        except OSError as e:
-            log("failed to forward %s event: %s" % (cb_type, e))
-            return 1
+                {"cb_type": cb_type, "data": data, "ts": time.time()},
+                timeout=1)
+        except OSError:
+            # Daemon is down — respawn it detached and DROP this event.
+            # Waiting for it to come up would hold fppd's main loop; the
+            # reconcile loop converges on fppd's real state once it's up.
+            log("daemon down — spawned; dropped %s event" % cb_type)
+            spawn_daemon()
         return 0
 
     # Unknown invocation — answer --list-style so fppd just ignores us

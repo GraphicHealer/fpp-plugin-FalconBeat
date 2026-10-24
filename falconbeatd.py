@@ -1305,7 +1305,9 @@ class FalconBeatDaemon:
             raise RuntimeError(
                 "ffmpeg not found — cannot extract %s" % path)
         os.makedirs(AUDIO_DIR, exist_ok=True)
-        tmp = out + ".part"
+        # ffmpeg infers the container from the extension, so the temp name
+        # must keep it LAST: name.part.m4a, not name.m4a.part.
+        tmp = "%s.part%s" % (out[: -len(ext)], ext)
         nice = [p for p in (shutil.which("nice"),) if p]
         if codec in BROWSER_SAFE_AUDIO:
             # -readrate keeps ffmpeg from racing the SD card while fppd is
