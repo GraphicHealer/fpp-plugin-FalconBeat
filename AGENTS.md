@@ -80,13 +80,19 @@ writes — never a query string (proxy access logs would capture it).
   broadcasts the NEXT track's PLAY early. Remaining time is computed
   precisely — fppd's `seconds_remaining`/`seconds_played` are int-
   truncated (up to ~1s low), so the daemon uses `milliseconds_elapsed`
-  plus durations from `/api/media/<name>/duration` and
+  plus durations from `/api/media/<name>/duration` (response nests the
+  record under the filename: `{"song.mp3":{"duration":...}}`) and
   `/api/sequence/<name>/meta` (entry end = min(media, seq) — fppd's
   GetLengthInMS for "both" entries). The armed instant = entry end +
   `_extra_gap` (learned boundary→audio-start delay, converged by the
   verify pass, seeded 0.45s) + SCHEDULE_GAP_S, with pos0 placed at
   entry-end + `_extra_gap` — the real audio start, not the silent
-  boundary. When the media event then arrives, the armed instant STANDS
+  boundary. Pre-scheduling only arms when the very next playlist ENTRY
+  is that media item — `_entries`/`_entry_of_media` keep pause,
+  sequence-only and event slots alongside the media-only `_queue`, so a
+  track after a gap is never armed early (its own callback plays it;
+  the gap entry's callback PAUSEs listeners + cancels any armed
+  schedule). When the media event then arrives, the armed instant STANDS
   (PreparePlay can fire well ahead of the real transition; anchoring to
   it cut the outgoing tail and made the verify pass rewind the head
   audibly). Fallback when no pre-schedule exists: the callback-anchored
@@ -112,8 +118,10 @@ writes — never a query string (proxy access logs would capture it).
 - Rolling lookahead, not bulk pre-push: the room only ever holds
   {current, next}. Playlist `start` stores the ordered queue (callback
   payload sections if present, else `GET /api/playlist/<name>` using the
-  callback's `name`, then `current_playlist` in `/api/fppd/status`) and
-  pushes entries 0+1 at start; each PLAY then
+  callback's `name`, then `current_playlist` in `/api/fppd/status`) —
+  kept twice: `_entries` holds every entry's `(type, media_name)` so
+  non-audio entries stay visible, `_queue` is the media-only view used
+  for lookahead/eviction. It pushes entries 0+1 at start; each PLAY then
   advances the cursor and pushes `queue[idx+1]` in the background so
   devices download during the current track. Every PLAY also evicts registered sources outside
   {current, next} — played tracks, parked (paused) sources, AND tracks

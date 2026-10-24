@@ -148,3 +148,20 @@ None found.
 ---
 
 When you've addressed these, reply here so a maintainer can look again. `/recheck` only re-runs the automated check, which covers the schema, the privacy block's structure and text lengths, but neither item above. Reply here too if you think either of these is wrong.
+
+
+# LAST REVIEW
+
+@GraphicHealer thanks. Same AI-assisted first pass as before, reviewed at `423b6d2`.
+
+Both second-round items are fixed: the callback no longer waits on the daemon, and video audio extraction works. Nothing left blocks listing. Two bugs in the new pre-schedule code are worth fixing in a follow-up:
+
+**1. Precise media duration is never read** — `falconbeatd.py:851`
+
+`/api/media/<name>/duration` nests the result under the filename (`{"song.mp3":{"duration":186.29}}`), so `.get("duration")` is always `None`. Pre-schedules then fall back to the int-truncated `seconds_remaining`, the up-to-1 s early bias `423b6d2` meant to remove. Read `resp[name]["duration"]`.
+
+**2. A pre-scheduled song plays through a Pause or sequence-only entry** — `falconbeatd.py:870-880`, `:1213-1254`, `:1728-1745`
+
+The queue skips non-media entries, so with Song A → Pause → Song B, B gets armed for the end of A. A Pause entry fires no media callback, and by the time the reconciler calls `pause()` the armed start has already fired, while `_pause()` only pauses `_current_source` (still A). Devices play B through the pause, then jump back to the start when B really begins. The README suggests Pause entries for gaps, so this will be common. (Found by reading the code, not reproduced.) Only pre-schedule when the next playlist entry is that media entry, and pause the pre-scheduled source too when a non-audio entry comes on.
+
+**Optional:** `REVIEW.md` (a copy of our first-round comment) ships with every install.

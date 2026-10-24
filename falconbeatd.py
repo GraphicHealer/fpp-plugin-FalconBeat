@@ -844,11 +844,17 @@ def fpp_position_seconds():
 
 
 def fpp_media_duration_seconds(name):
-    """Precise media duration (seconds) from the FPP media API, or None."""
+    """Precise media duration (seconds) from the FPP media API, or None.
+    The endpoint nests the record under the requested name:
+    {"song.mp3": {"duration": 186.29}}."""
     url = "http://127.0.0.1/api/media/%s/duration" % urllib.parse.quote(str(name))
     try:
         with urllib.request.urlopen(url, timeout=3) as r:
-            dur = float(json.loads(r.read()).get("duration"))
+            resp = json.loads(r.read())
+        rec = resp.get(name)
+        if not isinstance(rec, dict):
+            rec = resp  # tolerate a flat {"duration": ...} variant
+        dur = float(rec.get("duration"))
         return dur if dur > 0 else None
     except Exception:
         return None
@@ -914,6 +920,38 @@ def fpp_playlist_files(name):
         return []
 
 
+def playlist_entries(playlist):
+    """Ordered (type, media_name) per playlist entry. Non-audio entries
+    keep their type slot — the prescheduler must see pause/sequence-only
+    entries between songs, not just the media names."""
+    out = []
+    for section in ("leadIn", "mainPlaylist", "leadOut"):
+        for entry in playlist.get(section) or []:
+            out.append((str(entry.get("type") or "").lower(),
+                        entry_media_name(entry)))
+    return out
+
+
+def fpp_playlist_json(name):
+    """Raw playlist JSON for a named playlist via the FPP API."""
+    if not name:
+        return None
+    try:
+        base = FPP_STATUS_URL.rsplit("/api/", 1)[0]
+        url = ("%s/api/playlist/%s?mergeSubs=1"
+               % (base, urllib.parse.quote(str(name))))
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        LOG.warning("playlist %s fetch failed: %s", name, e)
+        return None
+
+
+def fpp_playlist_entries(name):
+    pl = fpp_playlist_json(name)
+    return playlist_entries(pl) if pl else []
+
+
 # --------------------------------------------------------------------------
 # Daemon
 # --------------------------------------------------------------------------
@@ -933,6 +971,8 @@ class FalconBeatDaemon:
         self._played_urls = set()  # sources that finished — pruned on next PLAY
         self._queue = []           # ordered playlist media names (dupes kept)
         self._queue_idx = -1       # queue position of the current track
+        self._entries = []         # full (type, media_name) playlist sequence
+        self._entry_of_media = []  # media-queue idx -> index into _entries
         self._wrap_next = False    # playlist repeats — last entry's "next" is 0
         self._queue_fetch_fail = {}  # name -> monotonic ts of last failed fetch
         self._playlist_active = False
@@ -1224,6 +1264,22 @@ class FalconBeatDaemon:
         nxt_i = self._queue_next_idx()
         if nxt_i < 0:
             return
+        if self._entries:
+            # Only arm when the immediately following playlist ENTRY is
+            # that media item. A pause, sequence-only, or event entry in
+            # between is a real gap — an armed PLAY would fire into it
+            # long before fppd reached the track. The media callbacks
+            # for those entries park listeners instead; their event
+            # path sends PLAY when the track actually starts.
+            fi = (self._entry_of_media[self._queue_idx]
+                  if 0 <= self._queue_idx < len(self._entry_of_media)
+                  else -1)
+            fj = self._entry_of_media[nxt_i]
+            adjacent = (fj == fi + 1)
+            wrapped = (self._wrap_next and fi >= 0
+                       and fi == len(self._entries) - 1 and fj == 0)
+            if not (adjacent or wrapped):
+                return
         name = self._queue[nxt_i]
         if name not in self._pushed:
             return  # lookahead hasn't delivered it — the event path copes
@@ -1353,7 +1409,7 @@ class FalconBeatDaemon:
                         LOG.info("fppd %s — reconciling to stopped",
                                  status_name)
                         self._playlist_active = False
-                        self._queue = []
+                        self._set_queue([])
                         self._queue_idx = -1
                         self._wrap_next = False
                         self._queue_fetch_fail.clear()
@@ -1808,7 +1864,8 @@ class FalconBeatDaemon:
             # playlist "name" but never the entry list, so the queue comes
             # from the playlist API (sections in data are kept as a
             # best-effort first try for other FPP variants).
-            names = playlist_media_files(data)
+            entries = playlist_entries(data)
+            names = [n for _t, n in entries if n]
             if not names:
                 pl = (data.get("name") or data.get("Playlist")
                       or data.get("playlistName"))
@@ -1817,8 +1874,9 @@ class FalconBeatDaemon:
                     pl = st.get("current_playlist") or ""
                     if isinstance(pl, dict):
                         pl = pl.get("playlist") or ""
-                names = fpp_playlist_files(pl)
-            self._queue = names
+                entries = fpp_playlist_entries(pl)
+                names = [n for _t, n in entries if n]
+            self._set_queue(entries)
             LOG.info("playlist queue: %d entries%s", len(names),
                      "" if names else " (keys: %s) — lookahead disabled"
                      % ",".join(sorted(data.keys())))
@@ -1851,7 +1909,7 @@ class FalconBeatDaemon:
         elif action in ("stop", "stopping", "stopped"):
             LOG.info("playlist %s", action)
             self._playlist_active = False
-            self._queue = []
+            self._set_queue([])
             self._queue_idx = -1
             self._wrap_next = False
             self._queue_fetch_fail.clear()
@@ -1946,9 +2004,10 @@ class FalconBeatDaemon:
             return
         if time.monotonic() - self._queue_fetch_fail.get(name, -61.0) < 60:
             return
-        names = fpp_playlist_files(name)
+        entries = fpp_playlist_entries(name)
+        names = [n for _t, n in entries if n]
         if names:
-            self._queue = names
+            self._set_queue(entries)
             self._queue_fetch_fail.pop(name, None)
             LOG.info("playlist queue: %d entries (%s)", len(names), name)
         else:
@@ -1966,6 +2025,15 @@ class FalconBeatDaemon:
                 self.ensure_source(self._queue[i])
             except Exception as e:
                 LOG.warning("start push %s failed: %s", self._queue[i], e)
+
+    def _set_queue(self, entries):
+        """Store the full playlist entry sequence and derive the media-only
+        queue + media→entry index map. Pause and sequence-only entries are
+        kept in _entries so the prescheduler can refuse to arm a track
+        across a gap it would fire into early."""
+        self._entries = entries
+        self._entry_of_media = [i for i, (_t, n) in enumerate(entries) if n]
+        self._queue = [entries[i][1] for i in self._entry_of_media]
 
     def _queue_next_idx(self):
         """Queue position of the entry after the cursor. On a repeating
