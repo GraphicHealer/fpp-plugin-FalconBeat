@@ -35,8 +35,8 @@ Input/Output Setup &rarr; FalconBeat. Enable it, then three fields:
 - **Server (LAN)** — `falconbeat.local` or `host:port`; one published port
   carries everything.
 - **Server Token** — the `FALCONBEAT_TOKEN` from your server.
-- **Sync Offset** — shifts where devices join the track. Raise it if the
-  audio trails the lights, lower it if it runs ahead.
+- **Sync Offset** — adds delay on the listener side to line up with FPP.
+  Raise it if the audio runs ahead of the lights, lower it if it trails.
 
 An Advanced group appears when you raise FPP's UI level.
 Status &rarr; FalconBeat Status shows the live connection state.

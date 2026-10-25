@@ -1296,11 +1296,19 @@ class FalconBeatDaemon:
             # OpenMediaOutput + output-pipeline start). syncOffsetMs is
             # applied to the POSITION only — putting it in T1 too would
             # shift both sides of (T1 - pos_at) and cancel itself out.
+            # Positive = more delay on the BeatSync side (pos-0 lands
+            # off seconds after the predicted audio start).
             t1_local = (time.time() + rem + self._extra_gap
                         + self.SCHEDULE_GAP_S)
-            pos_at = self.SCHEDULE_GAP_S + off
+            pos_at = self.SCHEDULE_GAP_S - off
+            if pos_at < 0.0:
+                # Offset beyond the gap buffer: pos-0 falls AFTER T1 —
+                # slide the armed instant out instead of clamping the
+                # position (which would silently cap the added delay).
+                t1_local -= pos_at
+                pos_at = 0.0
             session.send_play(
-                url, max(0.0, pos_at),
+                url, pos_at,
                 session.server_now_ms()
                 + (t1_local - time.time()) * 1000.0)
             self._presched = {
@@ -1625,7 +1633,7 @@ class FalconBeatDaemon:
         if armed:
             t2_local = presched["t_local"]
             # Matches the pos_at the armed PLAY actually carried.
-            target = max(0.0, self.SCHEDULE_GAP_S + off)
+            target = max(0.0, self.SCHEDULE_GAP_S - off)
             LOG.info("PLAY %s: pre-scheduled start stands (fires in %.2fs)",
                      media_name, t2_local - t_sample)
             self._current_source = url
@@ -1643,8 +1651,17 @@ class FalconBeatDaemon:
                 t2_local = t_sample + delay
             # syncOffsetMs shifts the POSITION only — the same offset in
             # t2 would cancel itself (pos-0 = t2 - target), which is what
-            # made the knob a no-op.
-            target = pos + (t2_local - t_sample) + off
+            # made the knob a no-op. Positive = more delay on the
+            # BeatSync side: subtract it so device pos-0 lands off
+            # seconds after fppd's.
+            target = pos + (t2_local - t_sample) - off
+            if target < 0.0 and session.execat_supported is not False:
+                # pos-0 lands after the execute instant — push T2 out
+                # rather than ship a negative trackTimeSeconds (the
+                # client's buffer start() would throw on it).
+                t2_local -= target
+                target = 0.0
+            target = max(0.0, target)  # old-server fallback: can't shift T2
             exec_at = session.server_now_ms() + (t2_local - time.time()) * 1000.0
             LOG.info("PLAY %s @ %.2fs (pos %.2f -> T+%.2f%s, offset %.3f)",
                      media_name, target, pos, t2_local - t_ev,
@@ -1755,11 +1772,12 @@ class FalconBeatDaemon:
             return
         # Where devices are, extrapolated: pos at T2 + elapsed since T2.
         device_pos = lp["target"] + (now - lp["t2"])
-        # Subtract the user's intended shift — syncOffsetMs lives in the
-        # position, so device_pos carries it. Without this a deliberate
-        # offset reads as anchor error: it would trip the corrective PLAY
-        # and get learned into _extra_gap, silently cancelling the knob.
-        err = device_pos - pos2 - lp.get("off", 0.0)  # >0: devices ahead
+        # Undo the user's intended shift — syncOffsetMs lives in the
+        # position (subtracting it), so device_pos carries -off. Without
+        # this a deliberate offset reads as anchor error: it would trip
+        # the corrective PLAY and get learned into _extra_gap, silently
+        # cancelling the knob.
+        err = device_pos - pos2 + lp.get("off", 0.0)  # >0: devices ahead
         if not playing:
             return
         if abs(err) <= self.VERIFY_ERR_S:
@@ -1774,15 +1792,19 @@ class FalconBeatDaemon:
             LOG.info("boundary->audio gap estimate now %.2fs",
                      self._extra_gap)
         delay = session.expected_delay_s()
-        target2 = pos2 + delay + lp["off"]
+        target2 = pos2 + delay - lp["off"]
+        t2v = delay
+        if target2 < 0.0 and session.execat_supported is not False:
+            t2v -= target2
+            target2 = 0.0
         try:
             session.send_play(
-                lp["url"], target2,
-                session.server_now_ms() + delay * 1000.0)
+                lp["url"], max(0.0, target2),
+                session.server_now_ms() + t2v * 1000.0)
             LOG.warning(
                 "start was off by %+dms — sent corrective PLAY "
                 "(if every song drifts the same way, adjust Sync Offset "
-                "by %+dms)", int(err * 1000), -int(err * 1000))
+                "by %+dms)", int(err * 1000), int(err * 1000))
         except Exception as e:
             LOG.warning("verify correction failed: %s", e)
 

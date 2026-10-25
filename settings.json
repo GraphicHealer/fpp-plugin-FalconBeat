@@ -144,7 +144,7 @@
         "syncOffsetMs": {
             "name": "syncOffsetMs",
             "description": "Sync Offset",
-            "tip": "Shifts where devices join the track — raise it if the audio trails the lights, lower it if it runs ahead.",
+            "tip": "Adds delay on the listener side to line up with FPP — raise it if the audio runs ahead of the lights, lower it if it trails.",
             "restart": 0,
             "reboot": 0,
             "level": 0,

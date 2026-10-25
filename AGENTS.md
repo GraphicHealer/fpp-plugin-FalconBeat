@@ -92,8 +92,8 @@ writes — never a query string (proxy access logs would capture it).
   GetLengthInMS for "both" entries). The armed instant = entry end +
   `_extra_gap` (learned boundary→audio-start delay, converged by the
   verify pass, seeded 0.45s) + SCHEDULE_GAP_S, with pos0 placed at
-  entry-end + `_extra_gap` − syncOffset — the real audio start, shifted
-  by the user's deliberate offset, not the silent boundary. Pre-scheduling only arms when the very next playlist ENTRY
+  entry-end + `_extra_gap` + syncOffset — the real audio start plus the
+  user's deliberate listener-side delay, not the silent boundary. Pre-scheduling only arms when the very next playlist ENTRY
   is that media item — `_entries`/`_entry_of_media` keep pause,
   sequence-only and event slots alongside the media-only `_queue`, so a
   track after a gap is never armed early (its own callback plays it;
