@@ -71,7 +71,13 @@ writes — never a query string (proxy access logs would capture it).
   computed from CLIENT_CHANGE stats + our own NTP RTT; `nudgeMs` adds on).
 - `trackTimeSeconds` is the playback offset at execute time — the daemon
   extrapolates the sampled FPP position to the execute instant and adds
-  `syncOffsetMs` (the user-facing tune knob).
+  `syncOffsetMs` (the user-facing tune knob). The offset goes in the
+  position ONLY: a device is at `trackTimeSeconds` at `executeAt`, so
+  its pos-0 instant = `executeAt - pos`; adding the offset to the
+  execute instant too shifts both terms and cancels the knob entirely.
+  The verify pass subtracts the stored offset from its error term for
+  the same reason — a deliberate offset must not read as anchor error
+  or be learned into `_extra_gap`.
 - Anchored transitions (patched server): media event T2 = callback ts +
   PREP_DELAY_S (fppd fires media callbacks in PreparePlay, before the
   audio pipeline starts — "most of a second on slow boards" per fppd
@@ -86,8 +92,8 @@ writes — never a query string (proxy access logs would capture it).
   GetLengthInMS for "both" entries). The armed instant = entry end +
   `_extra_gap` (learned boundary→audio-start delay, converged by the
   verify pass, seeded 0.45s) + SCHEDULE_GAP_S, with pos0 placed at
-  entry-end + `_extra_gap` — the real audio start, not the silent
-  boundary. Pre-scheduling only arms when the very next playlist ENTRY
+  entry-end + `_extra_gap` − syncOffset — the real audio start, shifted
+  by the user's deliberate offset, not the silent boundary. Pre-scheduling only arms when the very next playlist ENTRY
   is that media item — `_entries`/`_entry_of_media` keep pause,
   sequence-only and event slots alongside the media-only `_queue`, so a
   track after a gap is never armed early (its own callback plays it;

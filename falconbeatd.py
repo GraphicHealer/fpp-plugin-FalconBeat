@@ -1293,9 +1293,11 @@ class FalconBeatDaemon:
             # (entry end + _extra_gap) — the instant the next track's
             # audio actually starts, not the silent entry boundary
             # itself (fppd spends _extra_gap on the next entry's
-            # OpenMediaOutput + output-pipeline start).
+            # OpenMediaOutput + output-pipeline start). syncOffsetMs is
+            # applied to the POSITION only — putting it in T1 too would
+            # shift both sides of (T1 - pos_at) and cancel itself out.
             t1_local = (time.time() + rem + self._extra_gap
-                        + self.SCHEDULE_GAP_S + off)
+                        + self.SCHEDULE_GAP_S)
             pos_at = self.SCHEDULE_GAP_S + off
             session.send_play(
                 url, max(0.0, pos_at),
@@ -1635,11 +1637,14 @@ class FalconBeatDaemon:
         else:
             probe = 0.077 if session.execat_supported is None else 0.0
             if session.execat_supported is not False:
-                t2_local = max(t_ev + self.PREP_DELAY_S + off + probe,
+                t2_local = max(t_ev + self.PREP_DELAY_S + probe,
                                t_sample + 0.05)
             else:
-                t2_local = t_sample + delay + off
-            target = pos + (t2_local - t_sample)
+                t2_local = t_sample + delay
+            # syncOffsetMs shifts the POSITION only — the same offset in
+            # t2 would cancel itself (pos-0 = t2 - target), which is what
+            # made the knob a no-op.
+            target = pos + (t2_local - t_sample) + off
             exec_at = session.server_now_ms() + (t2_local - time.time()) * 1000.0
             LOG.info("PLAY %s @ %.2fs (pos %.2f -> T+%.2f%s, offset %.3f)",
                      media_name, target, pos, t2_local - t_ev,
@@ -1750,16 +1755,20 @@ class FalconBeatDaemon:
             return
         # Where devices are, extrapolated: pos at T2 + elapsed since T2.
         device_pos = lp["target"] + (now - lp["t2"])
-        err = device_pos - pos2  # >0: devices ahead of fppd
+        # Subtract the user's intended shift — syncOffsetMs lives in the
+        # position, so device_pos carries it. Without this a deliberate
+        # offset reads as anchor error: it would trip the corrective PLAY
+        # and get learned into _extra_gap, silently cancelling the knob.
+        err = device_pos - pos2 - lp.get("off", 0.0)  # >0: devices ahead
         if not playing:
             return
         if abs(err) <= self.VERIFY_ERR_S:
             LOG.info("start verified: devices %+dms vs fppd", int(err * 1000))
             return
         if lp.get("armed"):
-            # Armed math cancels syncOffset: err = real entry-end ->
-            # audio-start gap minus our estimate. Converge halfway so
-            # subsequent pre-scheduled starts land closer.
+            # err is now purely the real entry-end -> audio-start gap
+            # minus our estimate. Converge halfway so subsequent
+            # pre-scheduled starts land closer.
             self._extra_gap = min(2.5, max(
                 0.0, self._extra_gap + err * 0.5))
             LOG.info("boundary->audio gap estimate now %.2fs",
@@ -1773,7 +1782,7 @@ class FalconBeatDaemon:
             LOG.warning(
                 "start was off by %+dms — sent corrective PLAY "
                 "(if every song drifts the same way, adjust Sync Offset "
-                "by %+dms)", int(err * 1000), int(err * 1000))
+                "by %+dms)", int(err * 1000), -int(err * 1000))
         except Exception as e:
             LOG.warning("verify correction failed: %s", e)
 
